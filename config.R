@@ -3,11 +3,13 @@
 #' This file contains configuration settings for the iperf data analysis project.
 #' Edit these settings as needed before running the analysis scripts.
 
-# Input directory where iperf JSON files will be placed
-# Change this path to your preferred external location
-IPERF_INPUT_DIR <- "G:\My Drive\Projects\Git Home\iperf_data_analysis\iperf_data_analysis\input"
+# Configuration for iperf data analysis
 
-# Whether to copy files to the project's data/raw directory or just reference them directly
+# Directory where input iperf JSON files are located
+# Raw string syntax
+IPERF_INPUT_DIR <- r"(G:\My Drive\Projects\Git Home\iperf_data_analysis\iperf_data_analysis\input)"
+
+# Whether to copy files to the project structure or just reference them
 COPY_FILES_TO_PROJECT <- TRUE
 
 # Default directories within the project

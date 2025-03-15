@@ -1,3 +1,4 @@
+gitignore
 # History files
 .Rhistory
 .Rapp.history
@@ -47,3 +48,54 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
+
+# input Directory
+input/
+# output Directory
+output/
+
+# renv related - ONLY ignore the package libraries, not the lock file
+# DO commit: renv.lock, .Rprofile, renv/activate.R
+# DON'T commit: the folders below
+renv/library/
+renv/python/
+renv/staging/
+renv/local/
+
+# Operating system files
+.DS_Store
+Thumbs.db
+desktop.ini
+*.lnk
+
+# Large data files - if you have any
+*.rds
+*.csv
+*.xlsx
+*.xls
+*.feather
+*.parquet
+*.sqlite
+*.db
+
+# Log files
+*.log
+logs/
+
+# Environment variables and secrets
+.env
+# .Rprofile - REMOVED: This should be committed when using renv
+
+# Temporary files
+tmp/
+temp/
+.tmp*
+*~
+
+# Shiny apps
+shiny_logs/
+rsconnect/
+
+# If using bookdown or other publishing tools
+_book/
+_bookdown_files/

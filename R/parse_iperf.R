@@ -1,58 +1,274 @@
 library(jsonlite)
 library(tidyverse)
 
-#' Process a single iperf3 JSON file
+# Add this function to your parse_iperf.R file
+
+#' Extract user metadata from filename
 #'
+#' @param filename The iperf filename (name_isp_iperf_tcp_test.json format)
+#' @return List containing user name and ISP
+extract_user_metadata <- function(filename) {
+  # Remove file path if present
+  filename <- basename(filename)
+  
+  # Split by underscore
+  parts <- strsplit(filename, "_")[[1]]
+  
+  # Default values
+  result <- list(
+    user_name = "unknown",
+    isp = "unknown"
+  )
+  
+  # Extract information if format matches
+  if(length(parts) >= 2) {
+    result$user_name <- parts[1]
+    result$isp <- parts[2]
+  }
+  
+  return(result)
+}
+
+#' Process a single iperf3 JSON file
+#' 
 #' @param file_path Path to the iperf3 JSON file
 #' @return A tibble with parsed iperf3 data
 process_iperf_json <- function(file_path) {
-  # Read JSON file
-  iperf_data <- fromJSON(file_path)
+  # Print file being processed for debugging
+  cat("Processing file:", file_path, "\n")
   
-  # Extract test info
-  test_start_timestamp <- iperf_data$start$timestamp$time
-  test_protocol <- iperf_data$start$test_start$protocol
-  is_udp <- test_protocol == "UDP"
-  test_duration <- iperf_data$start$test_start$duration
+  # Extract user metadata from filename
+  user_meta <- extract_user_metadata(file_path)
   
-  # Process interval data
-  intervals_df <- as.data.frame(iperf_data$intervals)
-  
-  # Handle nested structure from JSON
-  if("streams" %in% names(intervals_df)) {
-    # Extract data from each interval
-    result <- map_df(1:nrow(intervals_df), function(i) {
-      interval <- intervals_df$streams[[i]]
+  # Read JSON file with error handling
+  tryCatch({
+    # Parse the JSON
+    json_text <- readLines(file_path, warn = FALSE)
+    json_text <- paste(json_text, collapse = "")
+    
+    # Additional debugging to see what's in the file
+    cat("File size:", nchar(json_text), "characters\n")
+    
+    # Parse the JSON
+    iperf_data <- fromJSON(json_text)
+    
+    # Extract test info
+    test_start_timestamp <- iperf_data$start$timestamp$time
+    test_protocol <- iperf_data$start$test_start$protocol
+    is_udp <- identical(toupper(test_protocol), "UDP")
+    
+    cat("Protocol detected:", test_protocol, "\n")
+    cat("Number of intervals:", length(iperf_data$intervals), "\n")
+    
+    # Create empty result dataframe with required columns
+    result <- tibble(
+      interval_start = numeric(),
+      interval_end = numeric(),
+      transfer_bytes = numeric(),
+      bitrate_mbps = numeric(),
+      protocol = character(),
+      timestamp = character(),
+      file = character(),
+      user_name = character(),
+      isp = character()
+    )
+    
+    # Add UDP-specific empty columns if needed
+    if(is_udp) {
+      result$packets_total <- numeric()
+      result$packets_lost <- numeric()
+      result$lost_percent <- numeric()
+      result$jitter_ms <- numeric()
+    }
+    
+    # EXTRACT INDIVIDUAL INTERVAL DATA - CRITICAL FIX
+    # -------------------------------------------
+    cat("\nExtracting individual interval data...\n")
+    
+    # Get a deeper look at the intervals structure
+    cat("Full intervals structure:\n")
+    str(iperf_data$intervals, max.level = 4)
+    
+    # Process intervals from iperf data
+    if(length(iperf_data$intervals) > 0) {
+      interval_count <- 0
       
-      # Basic metrics for both TCP and UDP
-      data <- tibble(
-        interval_start = intervals_df$streams[[i]][[1]]$start,
-        interval_end = intervals_df$streams[[i]][[1]]$end,
-        transfer_bytes = intervals_df$streams[[i]][[1]]$bytes,
-        bitrate_mbps = intervals_df$streams[[i]][[1]]$bits_per_second / 1000000
-      )
-      
-      # Add UDP-specific metrics
-      if(is_udp) {
-        data$jitter_ms <- intervals_df$streams[[i]][[1]]$jitter_ms
-        data$packets_lost <- intervals_df$streams[[i]][[1]]$lost_packets
-        data$packets_total <- intervals_df$streams[[i]][[1]]$packets
-        data$lost_percent <- data$packets_lost / data$packets_total * 100
+      for(i in 1:length(iperf_data$intervals)) {
+        interval <- iperf_data$intervals[[i]]
+        cat("\nProcessing interval", i, "of", length(iperf_data$intervals), "\n")
+        
+        # Approach 1: Try direct extraction if interval is a list with sum element
+        if(is.list(interval) && "sum" %in% names(interval)) {
+          cat("Found 'sum' element in interval", i, "\n")
+          sum_data <- interval$sum
+          
+          # Debug sum data
+          cat("Sum data structure:\n")
+          str(sum_data, max.level = 2)
+          
+          # Check if sum has essential fields
+          if(is.list(sum_data) && 
+             "start" %in% names(sum_data) && 
+             "end" %in% names(sum_data) && 
+             "bits_per_second" %in% names(sum_data)) {
+            
+            cat("Creating row from sum data\n")
+            
+            data_row <- tibble(
+              interval_start = sum_data$start,
+              interval_end = sum_data$end,
+              bitrate_mbps = sum_data$bits_per_second / 1000000,
+              protocol = test_protocol,
+              timestamp = test_start_timestamp,
+              file = basename(file_path),
+              user_name = user_meta$user_name,
+              isp = user_meta$isp
+            )
+            
+            # Add bytes if available
+            if("bytes" %in% names(sum_data)) {
+              data_row$transfer_bytes <- sum_data$bytes
+            }
+            
+            # Add UDP-specific metrics
+            if(is_udp) {
+              if("packets" %in% names(sum_data)) data_row$packets_total <- sum_data$packets
+              if("lost_packets" %in% names(sum_data)) data_row$packets_lost <- sum_data$lost_packets
+              if("jitter_ms" %in% names(sum_data)) data_row$jitter_ms <- sum_data$jitter_ms
+              
+              if("packets" %in% names(sum_data) && "lost_packets" %in% names(sum_data) && sum_data$packets > 0) {
+                data_row$lost_percent <- (sum_data$lost_packets / sum_data$packets) * 100
+              } else {
+                data_row$lost_percent <- 0
+              }
+            }
+            
+            result <- bind_rows(result, data_row)
+            interval_count <- interval_count + 1
+          }
+        } 
+        
+        # Approach 2: Try to access streams if available
+        if(is.list(interval) && "streams" %in% names(interval)) {
+          streams <- interval$streams
+          cat("Found 'streams' element with", length(streams), "stream(s)\n")
+          
+          for(j in 1:length(streams)) {
+            stream <- streams[[j]]
+            
+            # Debug stream structure
+            cat("Stream", j, "structure:\n")
+            str(stream, max.level = 2)
+            
+            if(is.list(stream) && 
+               "start" %in% names(stream) && 
+               "end" %in% names(stream) && 
+               "bits_per_second" %in% names(stream)) {
+              
+              cat("Creating row from stream data\n")
+              
+              data_row <- tibble(
+                interval_start = stream$start,
+                interval_end = stream$end,
+                bitrate_mbps = stream$bits_per_second / 1000000,
+                protocol = test_protocol,
+                timestamp = test_start_timestamp,
+                file = basename(file_path),
+                user_name = user_meta$user_name,
+                isp = user_meta$isp
+              )
+              
+              # Add bytes if available
+              if("bytes" %in% names(stream)) {
+                data_row$transfer_bytes <- stream$bytes
+              }
+              
+              # Add UDP-specific metrics
+              if(is_udp) {
+                if("packets" %in% names(stream)) data_row$packets_total <- stream$packets
+                if("lost_packets" %in% names(stream)) data_row$packets_lost <- stream$lost_packets
+                if("jitter_ms" %in% names(stream)) data_row$jitter_ms <- stream$jitter_ms
+                
+                if("packets" %in% names(stream) && "lost_packets" %in% names(stream) && stream$packets > 0) {
+                  data_row$lost_percent <- (stream$lost_packets / stream$packets) * 100
+                } else {
+                  data_row$lost_percent <- 0
+                }
+              }
+              
+              result <- bind_rows(result, data_row)
+              interval_count <- interval_count + 1
+            }
+          }
+        }
       }
       
-      return(data)
-    })
+      cat("Processed", interval_count, "intervals\n")
+    } else {
+      cat("No intervals found in JSON data\n")
+    }
     
-    # Add test metadata
-    result$protocol <- test_protocol
-    result$timestamp <- test_start_timestamp
-    result$file <- basename(file_path)
+    # Add summary data if we didn't get any interval data
+    if(nrow(result) == 0 && "end" %in% names(iperf_data) && 
+       "sum_sent" %in% names(iperf_data$end) && is.list(iperf_data$end$sum_sent)) {
+      
+      cat("No interval data found, falling back to summary data\n")
+      
+      # Get summary data
+      summary_data <- iperf_data$end$sum_sent
+      
+      # Create a row from summary data
+      data_row <- tibble(
+        interval_start = 0,
+        interval_end = summary_data$seconds,
+        bitrate_mbps = summary_data$bits_per_second / 1000000,
+        protocol = test_protocol,
+        timestamp = test_start_timestamp,
+        file = basename(file_path),
+        user_name = user_meta$user_name,
+        isp = user_meta$isp
+      )
+      
+      # Add bytes if available
+      if("bytes" %in% names(summary_data)) {
+        data_row$transfer_bytes <- summary_data$bytes
+      }
+      
+      # Add UDP-specific metrics if available
+      if(is_udp) {
+        if("packets" %in% names(summary_data)) data_row$packets_total <- summary_data$packets
+        if("lost_packets" %in% names(summary_data)) data_row$packets_lost <- summary_data$lost_packets
+        if("jitter_ms" %in% names(summary_data)) data_row$jitter_ms <- summary_data$jitter_ms
+        
+        if("packets" %in% names(summary_data) && "lost_packets" %in% names(summary_data) && summary_data$packets > 0) {
+          data_row$lost_percent <- (summary_data$lost_packets / summary_data$packets) * 100
+        } else {
+          data_row$lost_percent <- 0
+        }
+      }
+      
+      result <- bind_rows(result, data_row)
+    }
     
-    return(result)
-  } else {
-    warning(paste("Unexpected JSON structure in file:", file_path))
+    # If we got data, return it
+    if(nrow(result) > 0) {
+      cat("Successfully extracted", nrow(result), "data rows\n")
+      
+      # Fill in any NA transfer_bytes
+      if(any(is.na(result$transfer_bytes))) {
+        result$transfer_bytes[is.na(result$transfer_bytes)] <- 0
+      }
+      
+      return(result)
+    } else {
+      warning(paste("Could not extract interval data from file:", file_path))
+      return(NULL)
+    }
+  }, error = function(e) {
+    warning(paste("Error processing file:", file_path, "-", e$message))
+    print(e)  # Print the full error for debugging
     return(NULL)
-  }
+  })
 }
 
 #' Process multiple iperf3 JSON files
@@ -60,6 +276,41 @@ process_iperf_json <- function(file_path) {
 #' @param file_paths Vector of file paths
 #' @return Combined tibble with data from all files
 process_iperf_files <- function(file_paths) {
-  combined_data <- map_df(file_paths, process_iperf_json)
-  return(combined_data)
+  # Check if we have any files
+  if(length(file_paths) == 0) {
+    warning("No files to process")
+    return(tibble())
+  }
+  
+  # Process each file
+  results_list <- list()
+  for(i in 1:length(file_paths)) {
+    results_list[[i]] <- process_iperf_json(file_paths[i])
+  }
+  
+  # Remove NULL results and combine
+  results_list <- results_list[!sapply(results_list, is.null)]
+  
+  if(length(results_list) > 0) {
+    # Check if all results have the same columns
+    column_sets <- lapply(results_list, names)
+    if(length(unique(column_sets)) > 1) {
+      cat("Warning: Not all result data frames have the same columns. Adjusting...\n")
+      # Get all column names
+      all_cols <- unique(unlist(column_sets))
+      # Make sure all results have all columns
+      for(i in 1:length(results_list)) {
+        missing_cols <- setdiff(all_cols, names(results_list[[i]]))
+        for(col in missing_cols) {
+          results_list[[i]][[col]] <- NA
+        }
+      }
+    }
+    
+    combined_data <- bind_rows(results_list)
+    return(combined_data)
+  } else {
+    warning("None of the files could be processed successfully")
+    return(tibble())
+  }
 }
