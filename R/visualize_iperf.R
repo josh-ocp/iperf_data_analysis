@@ -11,6 +11,28 @@ plot_throughput <- function(data, title = "Network Throughput") {
   # Sort data by time
   data <- data %>% arrange(interval_start)
   
+  # If we have test_date and test_time, add them to the title
+  if("test_date" %in% names(data) && !is.na(data$test_date[1]) && 
+     "test_time" %in% names(data) && !is.na(data$test_time[1])) {
+    
+    # Format date nicely
+    test_date <- data$test_date[1]
+    formatted_date <- paste0(
+      substr(test_date, 1, 4), "-",
+      substr(test_date, 5, 6), "-",
+      substr(test_date, 7, 8)
+    )
+    
+    # Format time nicely
+    test_time <- data$test_time[1]
+    formatted_time <- paste0(
+      substr(test_time, 1, 2), ":",
+      substr(test_time, 3, 4)
+    )
+    
+    title <- paste0(title, " (", formatted_date, " ", formatted_time, ")")
+  }
+  
   # Create the basic throughput plot
   p <- data %>%
     ggplot(aes(x = interval_start, y = bitrate_mbps)) +
@@ -278,9 +300,7 @@ plot_test_comparison <- function(data) {
   return(combined)
 }
 
-# Add a new function for comparing users
-
-#' Compare performance across different users
+#' Compare performance across different users (TCP only)
 #'
 #' @param data Combined data from multiple users
 #' @return ggplot object
@@ -296,64 +316,44 @@ plot_user_comparison <- function(data) {
   
   # Bar chart of average throughput by user
   p1 <- data %>%
-    group_by(user_label, protocol) %>%
+    group_by(user_label) %>%
     summarize(
       avg_bitrate = mean(bitrate_mbps),
       .groups = "drop"
     ) %>%
-    ggplot(aes(x = user_label, y = avg_bitrate, fill = protocol)) +
-    geom_bar(stat = "identity", position = "dodge") +
+    ggplot(aes(x = reorder(user_label, avg_bitrate), y = avg_bitrate, fill = user_label)) +
+    geom_bar(stat = "identity") +
+    geom_text(aes(label = round(avg_bitrate, 1)), hjust = -0.1) + 
+    coord_flip() +
     labs(
       title = "Average Throughput by User",
-      x = "User (ISP)",
-      y = "Average Throughput (Mbps)",
-      fill = "Protocol"
+      x = "",
+      y = "Average Throughput (Mbps)"
     ) +
     theme_minimal() +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    theme(legend.position = "none")
   
   # Boxplot of throughput distribution by user
   p2 <- data %>%
-    ggplot(aes(x = user_label, y = bitrate_mbps, fill = protocol)) +
+    ggplot(aes(x = reorder(user_label, bitrate_mbps, FUN = median), y = bitrate_mbps, fill = user_label)) +
     geom_boxplot() +
+    coord_flip() +
     labs(
       title = "Throughput Distribution by User",
-      x = "User (ISP)",
-      y = "Throughput (Mbps)",
-      fill = "Protocol"
+      x = "",
+      y = "Throughput (Mbps)"
     ) +
     theme_minimal() +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    theme(legend.position = "none")
   
-  # For UDP tests, add packet loss comparison
-  if("lost_percent" %in% names(data)) {
-    p3 <- data %>%
-      filter(protocol == "UDP") %>%
-      group_by(user_label) %>%
-      summarize(
-        avg_loss = mean(lost_percent),
-        .groups = "drop"
-      ) %>%
-      ggplot(aes(x = user_label, y = avg_loss, fill = user_label)) +
-      geom_bar(stat = "identity") +
-      labs(
-        title = "Average Packet Loss by User (UDP)",
-        x = "User (ISP)",
-        y = "Packet Loss (%)"
-      ) +
-      theme_minimal() +
-      theme(axis.text.x = element_text(angle = 45, hjust = 1))
-    
-    # Combine all plots
-    combined <- (p1 / p2 / p3) + 
-      plot_annotation(title = "User Comparison", 
-                      theme = theme(plot.title = element_text(face = "bold")))
-  } else {
-    # Combine just the throughput plots
-    combined <- (p1 / p2) + 
-      plot_annotation(title = "User Comparison", 
-                      theme = theme(plot.title = element_text(face = "bold")))
-  }
+  # Combine plots
+  combined <- p1 / p2 + 
+    plot_layout(heights = c(1, 1.5)) + 
+    plot_annotation(
+      title = "User Connection Comparison", 
+      subtitle = paste("Based on", length(unique(data$file)), "tests from", length(unique(data$user_label)), "users"),
+      theme = theme(plot.title = element_text(face = "bold", size = 16))
+    )
   
   return(combined)
 }

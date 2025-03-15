@@ -5,8 +5,8 @@ library(tidyverse)
 
 #' Extract user metadata from filename
 #'
-#' @param filename The iperf filename (name_isp_iperf_tcp_test.json format)
-#' @return List containing user name and ISP
+#' @param filename The iperf filename (name_isp_iperf_tcp_test_date_time.json format)
+#' @return List containing user name, ISP, and test date/time
 extract_user_metadata <- function(filename) {
   # Remove file path if present
   filename <- basename(filename)
@@ -17,13 +17,42 @@ extract_user_metadata <- function(filename) {
   # Default values
   result <- list(
     user_name = "unknown",
-    isp = "unknown"
+    isp = "unknown",
+    test_date = NA,
+    test_time = NA
   )
   
   # Extract information if format matches
   if(length(parts) >= 2) {
     result$user_name <- parts[1]
     result$isp <- parts[2]
+    
+    # Extract date and time if available
+    if(length(parts) >= 6) {
+      # Expected format: name_isp_iperf_tcp_test_date_time.json
+      result$test_date <- parts[5]
+      
+      # Extract time from the last part (remove .json extension)
+      time_part <- parts[6]
+      result$test_time <- sub("\\.json$", "", time_part)
+      
+      # Create a datetime object
+      datetime_str <- paste(result$test_date, result$test_time)
+      tryCatch({
+        result$test_datetime <- ymd_hms(
+          paste0(
+            substr(result$test_date, 1, 4), "-",  # Year
+            substr(result$test_date, 5, 6), "-",  # Month
+            substr(result$test_date, 7, 8), " ",  # Day
+            substr(result$test_time, 1, 2), ":",  # Hour
+            substr(result$test_time, 3, 4), ":",  # Minute
+            substr(result$test_time, 5, 6)        # Second
+          )
+        )
+      }, error = function(e) {
+        warning("Could not parse date/time: ", e$message)
+      })
+    }
   }
   
   return(result)
