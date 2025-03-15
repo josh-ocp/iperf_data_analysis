@@ -38,16 +38,19 @@ extract_user_metadata <- function(filename) {
       
       # Create a datetime object
       datetime_str <- paste(result$test_date, result$test_time)
+      
+      # Try parsing with explicit format instead of automatic detection
       tryCatch({
         result$test_datetime <- ymd_hms(
           paste0(
-            substr(result$test_date, 1, 4), "-",  # Year
-            substr(result$test_date, 5, 6), "-",  # Month
-            substr(result$test_date, 7, 8), " ",  # Day
-            substr(result$test_time, 1, 2), ":",  # Hour
-            substr(result$test_time, 3, 4), ":",  # Minute
-            substr(result$test_time, 5, 6)        # Second
-          )
+            substr(result$test_date, 1, 4), "-",
+            substr(result$test_date, 5, 6), "-",
+            substr(result$test_date, 7, 8), " ",
+            substr(result$test_time, 1, 2), ":",
+            substr(result$test_time, 3, 4), ":",
+            ifelse(nchar(result$test_time) >= 6, substr(result$test_time, 5, 6), "00")
+          ),
+          quiet = TRUE
         )
       }, error = function(e) {
         warning("Could not parse date/time: ", e$message)

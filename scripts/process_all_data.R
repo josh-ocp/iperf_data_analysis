@@ -250,7 +250,7 @@ tcp_files <- process_input_files()
 tcp_data <- process_tcp_data(tcp_files)
 
 # Generate summary report with just TCP data
-create_summary_report(tcp_data, NULL)  # Passing NULL for UDP data
+create_summary_report(tcp_data)  # TCP data only
 
 # Create user comparisons if we have multiple users
 if(!is.null(tcp_data) && nrow(tcp_data) > 0 && "user_name" %in% names(tcp_data)) {

@@ -65,6 +65,29 @@ plot_throughput <- function(data, title = "Network Throughput") {
       panel.grid.minor = element_blank()
     )
   
+  # Special handling for single data point
+  if(nrow(data) == 1) {
+    # For a single data point, create a bar chart instead of a line
+    p <- data %>%
+      ggplot(aes(x = "Single Point", y = bitrate_mbps)) +
+      geom_col(fill = "steelblue", width = 0.5) +
+      geom_text(aes(label = round(bitrate_mbps, 1)), vjust = -0.5) +
+      labs(
+        title = title,
+        subtitle = "Single data point (summary data only)",
+        x = "",
+        y = "Throughput (Mbps)",
+        caption = format(Sys.time(), "Generated: %Y-%m-%d %H:%M:%S")
+      ) +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(face = "bold"),
+        panel.grid.minor = element_blank()
+      )
+    
+    return(p)
+  }
+  
   # If we have enough data points, add distribution histogram
   if(nrow(data) >= 10) {
     # Create histogram/density plot
