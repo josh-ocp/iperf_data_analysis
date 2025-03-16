@@ -16,6 +16,47 @@ source(here("R", "parse_iperf.R"))
 source(here("R", "analyze_iperf.R"))
 source(here("R", "visualize_iperf.R"))
 
+# Add debugging function for file finding
+debug_file_paths <- function() {
+  input_dir <- here("Input")
+  message("Looking for input directory at: ", input_dir)
+  message("Directory exists: ", dir.exists(input_dir))
+  
+  if(dir.exists(input_dir)) {
+    files <- list.files(input_dir, pattern = "\\.(csv|txt|log)$", full.names = TRUE, recursive = TRUE)
+    message("Found ", length(files), " files with .csv, .txt, or .log extensions")
+    message("Files found: ", paste(basename(files), collapse = ", "))
+    
+    # Show a preview of the first file content for debugging
+    if(length(files) > 0) {
+      tryCatch({
+        file_path <- files[1]
+        message("File preview for: ", basename(file_path))
+        first_lines <- readLines(file_path, n = 10)
+        message("File content (first 10 lines):")
+        message(paste(first_lines, collapse = "\n"))
+        
+        # Check for iperf data patterns
+        if(any(grepl("^\\[\\s*\\d+\\]\\s+\\d+\\.\\d+-\\d+\\.\\d+\\s+sec", first_lines))) {
+          message("File appears to be a raw iperf output file")
+        } else if(any(grepl("interval_start|bitrate|bits_per_second", first_lines))) {
+          message("File appears to be a formatted CSV file")
+        } else {
+          message("File format is unknown - may cause parsing issues")
+        }
+      }, error = function(e) {
+        message("Error reading file preview: ", e$message)
+      })
+    }
+    
+    return(files)
+  } else {
+    message("Input directory not found. Creating it now.")
+    dir.create(input_dir, recursive = TRUE, showWarnings = FALSE)
+    return(character(0))
+  }
+}
+
 # UI Definition
 ui <- dashboardPage(
   dashboardHeader(title = "iPerf Data Analysis"),
@@ -103,35 +144,34 @@ server <- function(input, output, session) {
   
   # Load data on startup and when refresh button is clicked
   observeEvent(c(input$refresh_data, 1), {
-    # Process data using your existing functions
-    files <- process_input_files()
-    data <- process_tcp_data(files)
-    tcp_data(data)
+    # Debug file paths
+    files <- debug_file_paths()
     
-    # Update UI elements based on loaded data
-    if(!is.null(data) && nrow(data) > 0) {
-      if("user_name" %in% names(data)) {
-        updateSelectInput(session, "user_filter", 
-                         choices = c("All", unique(data$user_name)))
-      }
-      
-      if("isp" %in% names(data)) {
-        updateSelectInput(session, "isp_filter", 
-                         choices = c("All", unique(data$isp)))
-      }
-      
-      if("file" %in% names(data)) {
-        updateCheckboxGroupInput(session, "selected_tests", 
-                               choices = unique(data$file))
-      }
-      
-      if("bitrate_mbps" %in% names(data)) {
-        max_throughput <- ceiling(max(data$bitrate_mbps, na.rm = TRUE))
-        updateSliderInput(session, "throughput_range", 
-                         max = max(1000, max_throughput),
-                         value = c(0, max_throughput))
-      }
+    if(length(files) == 0) {
+      message("No files found. Please add CSV or TXT files to the Input directory.")
+      showNotification("No files found in Input directory. Please add CSV or TXT files.", 
+                      type = "error", duration = 10)
+      return(NULL)
     }
+    
+    # Process data using existing functions from parse_iperf.R
+    tryCatch({
+      # Use the existing process_tcp_data function that handles all file types
+      data <- process_tcp_data(files)
+      
+      if(is.null(data) || nrow(data) == 0) {
+        message("Failed to parse any data files. Check console for details.")
+        showNotification("Failed to parse any data files. Check console for details.", 
+                      type = "error", duration = 10)
+        return(NULL)
+      }
+      
+      tcp_data(data)
+    }, error = function(e) {
+      message("Error processing files: ", e$message)
+      showNotification(paste("Error processing files:", e$message), 
+                     type = "error", duration = 10)
+    })
   })
   
   # Filter data based on inputs
@@ -224,7 +264,7 @@ server <- function(input, output, session) {
   output$dashboard_plot <- renderPlotly({
     data <- filtered_data()
     if(is.null(data) || nrow(data) == 0) {
-      return(plot_ly() %>% 
+      return(plot_ly() %>%
         add_annotations(text = "No data available. Click 'Refresh Data' to load data.", 
                         x = 0.5, y = 0.5, font = list(size = 15)))
     }
@@ -322,6 +362,34 @@ server <- function(input, output, session) {
     })
     
     tags$ul(link_list)
+  })
+  
+  # Update UI elements based on loaded data
+  observe({
+    data <- tcp_data()
+    if(!is.null(data) && nrow(data) > 0) {
+      if("user_name" %in% names(data)) {
+        updateSelectInput(session, "user_filter", 
+                         choices = c("All", unique(data$user_name)))
+      }
+      
+      if("isp" %in% names(data)) {
+        updateSelectInput(session, "isp_filter", 
+                         choices = c("All", unique(data$isp)))
+      }
+      
+      if("file" %in% names(data)) {
+        updateCheckboxGroupInput(session, "selected_tests", 
+                               choices = unique(data$file))
+      }
+      
+      if("bitrate_mbps" %in% names(data)) {
+        max_throughput <- ceiling(max(data$bitrate_mbps, na.rm = TRUE))
+        updateSliderInput(session, "throughput_range",
+                         max = max(1000, max_throughput),
+                         value = c(0, max_throughput))
+      }
+    }
   })
 }
 

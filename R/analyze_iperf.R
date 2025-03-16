@@ -145,11 +145,49 @@ compare_tests <- function(data, group_var) {
   return(comparison)
 }
 
+# Line 147 was empty, and line 148 had a stray '/' character
+# Removing the problematic character
+
+# Add a proper comment or closing statement here if needed
+# If this was intended to be a comment, change it to R's comment style using #
+
 #' Group and summarize iperf tests by date
 #'
 #' @param tcp_data Combined dataframe of all TCP test data
 #' @return Dataframe with daily summary statistics
 group_by_date <- function(tcp_data) {
+  # First check if test_datetime exists
+  if(!"test_datetime" %in% names(tcp_data)) {
+    # Try to create test_datetime from other fields if available
+    if("file" %in% names(tcp_data)) {
+      # Extract date from filename following the pattern in the example files
+      # Pattern: root_Ziply_Fiber__ash_iperf_test_20250316_075748.txt
+      tcp_data <- tcp_data %>%
+        mutate(
+          extracted_date = str_extract(file, "\\d{8}_\\d{6}"),
+          test_datetime = if_else(
+            !is.na(extracted_date),
+            as.POSIXct(
+              paste0(
+                substr(extracted_date, 1, 4), "-",
+                substr(extracted_date, 5, 6), "-",
+                substr(extracted_date, 7, 8), " ",
+                substr(extracted_date, 10, 11), ":",
+                substr(extracted_date, 12, 13), ":",
+                substr(extracted_date, 14, 15)
+              ), 
+              format = "%Y-%m-%d %H:%M:%S"
+            ),
+            Sys.time() # Use current time as fallback
+          )
+        )
+    } else {
+      # If no usable information, add a dummy date
+      warning("No datetime information available in data, using current date")
+      tcp_data$test_datetime <- Sys.time()
+    }
+  }
+  
   tcp_data %>%
     mutate(
       test_date = as.Date(test_datetime)

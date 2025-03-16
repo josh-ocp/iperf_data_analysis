@@ -27,7 +27,6 @@ Options:
 - `-s SERVER`: Server to test (can specify multiple times)
 - `-d SECONDS`: Test duration in seconds (default: 120)
 - `-u USER`: Username to record (default: current user)
-- `-j`: Use JSON output format (recommended for more reliable parsing)
 
 #### Best Practices for Data Collection
 
@@ -42,11 +41,8 @@ Options:
 # Basic test
 ./run_iperf_test.sh -s speedtest.serverius.net -d 120
 
-# Advanced test with JSON output
-./run_iperf_test.sh -s speedtest.serverius.net -d 300 -j
-
 # Multiple servers
-./run_iperf_test.sh -s speedtest.serverius.net -s speedtest.london.linode.com -d 120 -j
+./run_iperf_test.sh -s speedtest.serverius.net -s speedtest.london.linode.com -d 120
 ```
 
 See `data_collection/BEST_PRACTICES.md` for more detailed guidance.
@@ -83,14 +79,12 @@ Results are saved to:
 
 The analysis can process:
 - Raw iPerf3 text output
-- iPerf3 JSON output (recommended)
 - Pre-processed CSV files
 
 ## Requirements
 
 R packages:
 - tidyverse
-- jsonlite
 - fs
 - patchwork
 - scales
@@ -99,6 +93,5 @@ R packages:
 
 ## Common Issues
 
-1. **JSON parse errors**: Some iPerf3 versions may produce malformed JSON. Use raw output as fallback.
-2. **Connectivity failures**: The script attempts to ping servers first to avoid hanging.
-3. **Disk space**: Long-term testing may accumulate large data files. Monitor available space.
+1. **Connectivity failures**: The script attempts to ping servers first to avoid hanging.
+2. **Disk space**: Long-term testing may accumulate large data files. Monitor available space.

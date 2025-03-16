@@ -506,6 +506,23 @@ plot_throughput_detailed <- function(data, title = "Network Throughput") {
 #' @param tcp_data Combined dataframe of all TCP test data
 #' @return A ggplot object
 plot_daily_summary <- function(tcp_data) {
+  # Check for test_datetime field first
+  if(!"test_datetime" %in% names(tcp_data)) {
+    # Create a simple placeholder plot if date info not available
+    return(
+      ggplot() + 
+        annotate("text", x = 0.5, y = 0.5, label = "Date information not available in data") +
+        theme_minimal() +
+        theme(
+          axis.title = element_blank(),
+          axis.text = element_blank(),
+          axis.ticks = element_blank(),
+          panel.grid = element_blank()
+        )
+    )
+  }
+  
+  # Regular processing with date information
   daily_data <- group_by_date(tcp_data)
   
   ggplot(daily_data, aes(x = test_date)) +
@@ -603,22 +620,46 @@ plot_throughput_heatmap <- function(tcp_data) {
 plot_test_comparison_boxplot <- function(tcp_data, max_tests = 8) {
   # If we have too many tests, select the most recent ones
   if(length(unique(tcp_data$file)) > max_tests) {
-    test_dates <- tcp_data %>%
-      group_by(file) %>%
-      summarize(test_datetime = first(test_datetime), .groups = "drop") %>%
-      arrange(desc(test_datetime)) %>%
-      slice_head(n = max_tests)
+    # Check if we have datetime information to select most recent
+    if("test_datetime" %in% names(tcp_data) && !all(is.na(tcp_data$test_datetime))) {
+      test_dates <- tcp_data %>%
+        group_by(file) %>%
+        summarize(test_datetime = first(test_datetime), .groups = "drop") %>%
+        arrange(desc(test_datetime)) %>%
+        slice_head(n = max_tests) %>%
+        pull(file)
+    } else {
+      # If no datetime info, just take the first max_tests
+      test_dates <- unique(tcp_data$file)[1:max_tests]
+    }
     
     tcp_data <- tcp_data %>%
-      filter(file %in% test_dates$file)
+      filter(file %in% test_dates)
   }
   
-  # Create simplified labels for each test based on date/time
-  tcp_data <- tcp_data %>%
-    mutate(
-      test_label = format(test_datetime, "%m-%d %H:%M")
-    )
+  # Create test labels - use datetime if available, otherwise use file names
+  # Add a test_label column with default value (filename without path)
+  tcp_data$test_label <- basename(as.character(tcp_data$file))
   
+  # Update labels if we have datetime
+  if("test_datetime" %in% names(tcp_data)) {
+    # For rows where test_datetime is not NA, use formatted datetime
+    valid_datetime <- !is.na(tcp_data$test_datetime)
+    if(any(valid_datetime)) {
+      tcp_data$test_label[valid_datetime] <- format(tcp_data$test_datetime[valid_datetime], "%m-%d %H:%M")
+    }
+  } else if(all(c("test_date", "test_time") %in% names(tcp_data))) {
+    # If we have date and time columns, try those instead
+    valid_date_time <- !is.na(tcp_data$test_date) & !is.na(tcp_data$test_time)
+    if(any(valid_date_time)) {
+      tcp_data$test_label[valid_date_time] <- paste(
+        tcp_data$test_date[valid_date_time], 
+        tcp_data$test_time[valid_date_time]
+      )
+    }
+  }
+  
+  # Create the boxplot
   ggplot(tcp_data, aes(x = test_label, y = bitrate_mbps)) +
     geom_boxplot(aes(fill = test_label), alpha = 0.7) +
     scale_fill_viridis_d() +
@@ -642,32 +683,61 @@ plot_test_comparison_boxplot <- function(tcp_data, max_tests = 8) {
 #' @param tcp_data Combined dataframe of all TCP test data
 #' @return A combined ggplot object using patchwork
 create_performance_dashboard <- function(tcp_data) {
-  # Create individual plots
-  p1 <- plot_daily_summary(tcp_data)
-  p2 <- plot_time_of_day(tcp_data)
-  p3 <- plot_test_comparison_boxplot(tcp_data)
+  # Check if we have test_datetime before creating time-based plots
+  has_datetime <- "test_datetime" %in% names(tcp_data) && 
+                   !all(is.na(tcp_data$test_datetime))
+  
+  # Create individual plots - fallback to basic plots if needed
+  p1 <- tryCatch({
+    if(has_datetime) {
+      plot_daily_summary(tcp_data)
+    } else {
+      # Basic throughput plot if no datetime information
+      plot_throughput(tcp_data, "Network Throughput Summary")
+    }
+  }, error = function(e) {
+    message("Error in plot_daily_summary: ", e$message)
+    # Return a blank plot with error message
+    ggplot() + 
+      annotate("text", x = 0.5, y = 0.5, label = paste("Error:", e$message)) +
+      theme_void()
+  })
+  
+  p2 <- tryCatch({
+    if(has_datetime) {
+      plot_time_of_day(tcp_data)
+    } else {
+      # Histogram of throughput values
+      tcp_data %>%
+        ggplot(aes(x = bitrate_mbps)) +
+        geom_histogram(bins = 30, fill = "steelblue", alpha = 0.7) +
+        labs(title = "Throughput Distribution", x = "Throughput (Mbps)", y = "Count") +
+        theme_minimal()
+    }
+  }, error = function(e) {
+    message("Error in second plot: ", e$message)
+    ggplot() + annotate("text", x = 0.5, y = 0.5, label = "Error generating plot") + theme_void()
+  })
+  
+  p3 <- tryCatch({
+    plot_test_comparison_boxplot(tcp_data)
+  }, error = function(e) {
+    message("Error in plot_test_comparison_boxplot: ", e$message)
+    ggplot() + annotate("text", x = 0.5, y = 0.5, label = "Error generating plot") + theme_void()
+  })
   
   # Create a dashboard layout
-  dashboard <- (p1 / p2) | p3
-  
-  # Add title to the dashboard
-  dashboard + plot_annotation(
-    title = "Network Performance Dashboard",
-    subtitle = paste0("Based on ", length(unique(tcp_data$file)), 
-                     " iperf tests from ", 
-                     format(min(tcp_data$test_datetime, na.rm = TRUE), "%Y-%m-%d"),
-                     " to ", 
-                     format(max(tcp_data$test_datetime, na.rm = TRUE), "%Y-%m-%d")),
-    caption = paste0("Generated: ", Sys.time()),
-    theme = theme(
-      plot.title = element_text(size = 18, face = "bold"),
-      plot.subtitle = element_text(size = 12),
-      plot.caption = element_text(size = 8, hjust = 1)
+  (p1 + p2) / p3 + 
+    plot_layout(heights = c(2, 1)) +
+    plot_annotation(
+      title = "Network Performance Dashboard",
+      subtitle = paste("Analysis of", length(unique(tcp_data$file)), "iPerf Test(s)"),
+      caption = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+      theme = theme(plot.title = element_text(face = "bold", size = 16))
     )
-  )
 }
 
-# Add to visualize_iperf.R
+#' Add to visualize_iperf.R
 
 #' Plot time series comparison of multiple tests
 #'

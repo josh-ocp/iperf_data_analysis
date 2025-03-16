@@ -416,3 +416,30 @@ if(!is.null(tcp_data) && nrow(tcp_data) > 0 && "user_name" %in% names(tcp_data))
 cat("\nAnalysis complete! All results saved to the output directory.\n")
 cat("Check the summary report at:", here("output", "reports", "analysis_summary.md"), "\n")
 cat("=============================================\n\n")
+
+# Find and process TCP test files
+process_all_tcp_data <- function(file_pattern = "\\.(txt|csv)$") {
+  cat("Looking for TCP test files...\n")
+  
+  # Get file paths using the file pattern
+  files <- process_input_files()
+  
+  # Filter by pattern if specified
+  if (!is.null(file_pattern)) {
+    files <- files[grep(file_pattern, files)]
+  }
+  
+  if (length(files) == 0) {
+    cat("No TCP test files found matching pattern.\n")
+    return(NULL)
+  }
+  
+  cat("Found", length(files), "TCP test files.\n")
+  
+  # Process the TCP files
+  tcp_data <- process_tcp_data(files)
+  
+  # ...existing code...
+}
+
+# ...existing code...

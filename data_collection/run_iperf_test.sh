@@ -98,7 +98,7 @@ for SERVER_ADDRESS in "${SERVERS[@]}"; do
     server_name="${SERVER_ADDRESS%%.*}"
     
     # Create consistent filename format that R script can parse correctly
-    IPERF_TEST_RESULT="${RESULTS_FOLDER}/${USERNAME}_${ISP_SAFE}_${server_name}_iperf_test_${CURRENT_DATE}_${CURRENT_TIME}.csv"
+    IPERF_TEST_RESULT="${RESULTS_FOLDER}/${USERNAME}_${ISP_SAFE}_${server_name}_iperf_test_${CURRENT_DATE}_${CURRENT_TIME}.txt"
 
     # Check for connectivity by pinging the server (silently)
     echo "[$CURRENT_DATETIME] Checking connectivity to $server_name..." >> "$LOG_FILE"
