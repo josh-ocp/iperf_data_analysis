@@ -7,7 +7,8 @@
 
 # Directory where input iperf JSON files are located
 # Raw string syntax
-IPERF_INPUT_DIR <- r"(G:\My Drive\Projects\Git Home\iperf_data_analysis\iperf_data_analysis\input)"
+#IPERF_INPUT_DIR <- r"(G:\My Drive\Projects\Git Home\iperf_data_analysis\iperf_data_analysis\input)" # Windows
+IPERF_INPUT_DIR <- r"(/Users/joshb/Github/DevProjects/iperf_data_analysis/Input)" # Mac
 
 # Whether to copy files to the project structure or just reference them
 COPY_FILES_TO_PROJECT <- TRUE
