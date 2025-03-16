@@ -1,4 +1,3 @@
-gitignore
 # History files
 .Rhistory
 .Rapp.history
@@ -49,18 +48,11 @@ po/*~
 # RStudio Connect folder
 rsconnect/
 
-# input Directory
-input/
-# output Directory
-output/
-
 # renv related - ONLY ignore the package libraries, not the lock file
 # DO commit: renv.lock, .Rprofile, renv/activate.R
 # DON'T commit: the folders below
 renv/library/
 renv/python/
-renv/staging/
-renv/local/
 
 # Operating system files
 .DS_Store
@@ -99,3 +91,16 @@ rsconnect/
 # If using bookdown or other publishing tools
 _book/
 _bookdown_files/
+
+# Data directories
+data/input/
+data/raw/
+data/processed/
+output/figures/
+output/reports/
+
+# Keep directory structure but ignore contents
+input/*
+!input/.gitkeep
+output/*
+!output/.gitkeep
