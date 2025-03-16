@@ -1,5 +1,4 @@
 library(tidyverse)
-library(jsonlite)
 library(lubridate)
 
 #' Extract user metadata from filename with enhanced flexibility
@@ -96,163 +95,77 @@ extract_user_metadata <- function(filename) {
   return(result)
 }
 
-#' Process iperf JSON files into a tidy dataframe with robust error handling
+#' Process iperf CSV files into a tidy dataframe with robust error handling
 #'
-#' @param files Vector of file paths to iperf JSON files
+#' @param file_paths Vector of file paths to iperf CSV files
 #' @return Combined dataframe of processed iperf data
-process_iperf_files <- function(files) {
+process_iperf_files <- function(file_paths) {
   # Initialize an empty list to store data from each file
   all_data <- list()
   
-  for(file_path in files) {
+  for (file_path in file_paths) {
     tryCatch({
-      # Read the JSON file line by line and combine
-      json_lines <- readLines(file_path, warn = FALSE)
-      json_text <- paste(json_lines, collapse = "")
+      cat("Processing file:", basename(file_path), "\n")
       
-      # Check if JSON is valid
-      if(nchar(json_text) < 10) {
-        warning("File appears to be empty or too small: ", file_path)
-        next
-      }
+      # Read the CSV file
+      csv_data <- read_csv(file_path, show_col_types = FALSE)
       
-      # Try to parse the JSON with error handling
-      iperf_data <- tryCatch({
-        fromJSON(json_text, simplifyVector = TRUE, simplifyDataFrame = TRUE, simplifyMatrix = TRUE)
-      }, error = function(e) {
-        warning("JSON parse error in file ", file_path, ": ", e$message)
-        return(NULL)
-      })
-      
-      if(is.null(iperf_data)) {
+      # Check if CSV is valid
+      if(nrow(csv_data) == 0) {
+        warning("File appears to be empty: ", file_path)
         next
       }
       
       # Extract user metadata from filename
       metadata <- extract_user_metadata(file_path)
       
-      # Process intervals data with enhanced error handling
-      if(is.null(iperf_data$intervals) || length(iperf_data$intervals) == 0) {
-        warning("No interval data found in ", file_path, ", falling back to summary data")
-        
-        # Try to extract summary data if intervals are not available
-        if(!is.null(iperf_data$end) && !is.null(iperf_data$end$sum_sent)) {
-          sum_data <- iperf_data$end$sum_sent
-          
-          # Create a single row with summary data
-          data_row <- tibble(
-            interval_id = 1,
-            stream_id = 1,
-            socket = NA_integer_,
-            interval_start = 0,
-            interval_end = if(!is.null(sum_data$seconds)) sum_data$seconds else NA_real_,
-            interval_length = if(!is.null(sum_data$seconds)) sum_data$seconds else NA_real_,
-            bytes = if(!is.null(sum_data$bytes)) sum_data$bytes else NA_integer_,
-            bits_per_second = if(!is.null(sum_data$bits_per_second)) sum_data$bits_per_second else NA_real_,
-            bitrate_mbps = if(!is.null(sum_data$bits_per_second)) sum_data$bits_per_second / 1e6 else NA_real_,
-            retransmits = NA_integer_
-          )
-          
-          # Add metadata
-          data_row$file <- basename(file_path)
-          data_row$user_name <- metadata$user_name
-          data_row$isp <- metadata$isp
-          data_row$test_datetime <- metadata$test_datetime
-          data_row$date_formatted <- metadata$date_formatted
-          data_row$time_formatted <- metadata$time_formatted
-          data_row$datetime_readable <- metadata$datetime_readable
-          
-          # Add to the list
-          all_data[[length(all_data) + 1]] <- data_row
-          cat("Successfully extracted 1 data row from summary data\n")
-          next
+      # Expected columns for iperf CSV
+      required_columns <- c("interval_start", "bitrate_mbps")
+      if(!all(required_columns %in% colnames(csv_data))) {
+        # Check if we have a different column layout that can be mapped
+        if("interval" %in% colnames(csv_data) && "bits_per_second" %in% colnames(csv_data)) {
+          csv_data <- csv_data %>%
+            rename(interval_start = interval) %>%
+            mutate(bitrate_mbps = bits_per_second / 1e6)
         } else {
-          warning("Could not extract any usable data from ", file_path)
+          warning("Missing required columns in file ", file_path)
           next
         }
       }
       
-      # Initialize a dataframe to store flattened data
-      interval_data <- data.frame()
+      # Process and format the data
+      formatted_data <- csv_data %>%
+        # Add row IDs for interval and stream if not present
+        mutate(
+          interval_id = if("interval_id" %in% colnames(csv_data)) interval_id else row_number(),
+          stream_id = if("stream_id" %in% colnames(csv_data)) stream_id else 1,
+          socket = if("socket" %in% colnames(csv_data)) socket else NA_integer_
+        ) %>%
+        # Ensure we have all the standard columns
+        mutate(
+          interval_end = if("interval_end" %in% colnames(csv_data)) interval_end else interval_start + 1,
+          interval_length = if("interval_length" %in% colnames(csv_data)) interval_length else 1,
+          bytes = if("bytes" %in% colnames(csv_data)) bytes else NA_integer_,
+          retransmits = if("retransmits" %in% colnames(csv_data)) retransmits else NA_integer_
+        )
       
-      # Process each interval with error checking
-      for(i in seq_along(iperf_data$intervals)) {
-        # Safety check
-        if(is.null(iperf_data$intervals[[i]])) {
-          next
-        }
-        
-        # Get the streams data for this interval
-        streams <- iperf_data$intervals[[i]]$streams
-        
-        # Get the sum for this interval
-        sum_data <- iperf_data$intervals[[i]]$sum
-        
-        # If no streams, try using sum data
-        if(is.null(streams) || length(streams) == 0) {
-          if(!is.null(sum_data)) {
-            # Create a row for the sum with safe field access
-            row_data <- data.frame(
-              interval_id = i,
-              stream_id = 0,  # 0 indicates sum data
-              socket = NA_integer_,
-              interval_start = if(!is.null(sum_data$start)) sum_data$start else NA_real_,
-              interval_end = if(!is.null(sum_data$end)) sum_data$end else NA_real_,
-              interval_length = if(!is.null(sum_data$seconds)) sum_data$seconds else NA_real_,
-              bytes = if(!is.null(sum_data$bytes)) sum_data$bytes else NA_integer_,
-              bits_per_second = if(!is.null(sum_data$bits_per_second)) sum_data$bits_per_second else NA_real_,
-              bitrate_mbps = if(!is.null(sum_data$bits_per_second)) sum_data$bits_per_second / 1e6 else NA_real_,
-              retransmits = if(!is.null(sum_data$retransmits)) sum_data$retransmits else NA_integer_
-            )
-            
-            # Add to the dataframe
-            interval_data <- rbind(interval_data, row_data)
-          }
-          next
-        }
-        
-        # For each stream in this interval
-        for(j in seq_along(streams)) {
-          stream <- streams[[j]]
-          
-          # Skip if stream is NULL or missing required data
-          if(is.null(stream) || is.null(stream$bits_per_second)) {
-            next
-          }
-          
-          # Create a row for this stream with safe field access
-          row_data <- data.frame(
-            interval_id = i,
-            stream_id = j,
-            socket = if(!is.null(stream$socket)) stream$socket else NA_integer_,
-            interval_start = if(!is.null(stream$start)) stream$start else NA_real_,
-            interval_end = if(!is.null(stream$end)) stream$end else NA_real_,
-            interval_length = if(!is.null(stream$seconds)) stream$seconds else NA_real_,
-            bytes = if(!is.null(stream$bytes)) stream$bytes else NA_integer_,
-            bits_per_second = stream$bits_per_second,
-            bitrate_mbps = stream$bits_per_second / 1e6,  # Convert to Mbps
-            retransmits = if(!is.null(stream$retransmits)) stream$retransmits else NA_integer_
-          )
-          
-          # Add to the dataframe
-          interval_data <- rbind(interval_data, row_data)
-        }
-      }
-      
-      # Add metadata to each row
-      interval_data$file <- basename(file_path)
-      interval_data$user_name <- metadata$user_name
-      interval_data$isp <- metadata$isp
-      interval_data$test_datetime <- metadata$test_datetime
-      interval_data$date_formatted <- metadata$date_formatted
-      interval_data$time_formatted <- metadata$time_formatted
-      interval_data$datetime_readable <- metadata$datetime_readable
+      # Add metadata to the data
+      formatted_data <- formatted_data %>% 
+        mutate(
+          file = basename(file_path),
+          user_name = metadata$user_name,
+          isp = metadata$isp,
+          test_datetime = metadata$test_datetime,
+          date_formatted = metadata$date_formatted,
+          time_formatted = metadata$time_formatted,
+          datetime_readable = metadata$datetime_readable
+        )
       
       # Add to the list of all data
-      all_data[[length(all_data) + 1]] <- interval_data
+      all_data[[length(all_data) + 1]] <- formatted_data
       
       # Log success
-      cat("Successfully processed", nrow(interval_data), "data rows from", file_path, "\n")
+      cat("Successfully processed", nrow(formatted_data), "data rows from", file_path, "\n")
       
     }, error = function(e) {
       warning("Error processing file: ", file_path, " - ", e$message)

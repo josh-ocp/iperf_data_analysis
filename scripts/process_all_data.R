@@ -39,15 +39,15 @@ process_input_files <- function() {
     stop("Input directory does not exist. Please create it or update the config.R file.")
   }
   
-  # Get all JSON files in the input directory
-  input_files <- list.files(IPERF_INPUT_DIR, pattern = "\\.json$", full.names = TRUE)
+  # Get all CSV files in the input directory
+  input_files <- list.files(IPERF_INPUT_DIR, pattern = "\\.csv$", full.names = TRUE)
   
   if (length(input_files) == 0) {
-    cat("No JSON files found in the input directory.\n")
+    cat("No CSV files found in the input directory.\n")
     return(character(0))
   }
   
-  cat("Found", length(input_files), "iperf JSON files.\n")
+  cat("Found", length(input_files), "iperf CSV files.\n")
   
   # Copy files to project structure if configured to do so
   if (COPY_FILES_TO_PROJECT) {
@@ -59,7 +59,7 @@ process_input_files <- function() {
     }
     
     # Use the local copies for processing
-    input_files <- list.files(here("data", "raw", "tcp"), pattern = "\\.json$", full.names = TRUE)
+    input_files <- list.files(here("data", "raw", "tcp"), pattern = "\\.csv$", full.names = TRUE)
   }
   
   return(input_files)
@@ -74,7 +74,7 @@ process_tcp_data <- function(tcp_files) {
   
   cat("Processing iperf data...\n")
   
-  # Parse the raw JSON files
+  # Parse the raw CSV files
   tcp_data <- process_iperf_files(tcp_files)
   if (is.null(tcp_data) || nrow(tcp_data) == 0) {
     cat("No valid data found in files.\n")
@@ -319,6 +319,20 @@ create_summary_report <- function(tcp_data = NULL) {
                 paste0("* Total data points: ", nrow(tcp_data)),
                 paste0("* Average throughput: ", round(mean(tcp_data$bitrate_mbps, na.rm = TRUE), 2), " Mbps"),
                 paste0("* Max throughput: ", round(max(tcp_data$bitrate_mbps, na.rm = TRUE), 2), " Mbps"),
+                "")
+    
+    # Add general information to report
+    report <- c(report,
+                paste0("* Total files analyzed: ", length(tcp_files)),
+                paste0("* Data points: ", nrow(tcp_data)),
+                user_text,
+                isp_text,
+                "", 
+                "## Test Summary",
+                paste0("* Average throughput: ", round(mean(tcp_data$bitrate_mbps, na.rm = TRUE), 2), " Mbps"),
+                paste0("* Median throughput: ", round(median(tcp_data$bitrate_mbps, na.rm = TRUE), 2), " Mbps"),
+                paste0("* Standard deviation: ", round(sd(tcp_data$bitrate_mbps, na.rm = TRUE), 2), " Mbps"),
+                paste0("* CV (stability): ", round(sd(tcp_data$bitrate_mbps, na.rm = TRUE) / mean(tcp_data$bitrate_mbps, na.rm = TRUE) * 100, 2), "%"),
                 "")
   }
   

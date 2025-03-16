@@ -5,7 +5,7 @@
 
 # Configuration for iperf data analysis
 
-# Directory where input iperf JSON files are located
+# Directory where input iperf CSV files are located
 # Raw string syntax
 #IPERF_INPUT_DIR <- r"(G:\My Drive\Projects\Git Home\iperf_data_analysis\iperf_data_analysis\input)" # Windows
 IPERF_INPUT_DIR <- r"(/Users/joshb/Github/DevProjects/iperf_data_analysis/Input)" # Mac
