@@ -1,4 +1,4 @@
-# Enhanced iperf3 Data Analysis Script
+# Enhanced iperf3 Data Analysis Script for TCP Tests
 
 # Check and install required packages
 required_packages <- c("tidyverse", "jsonlite", "fs", "patchwork", "scales", "zoo", "lubridate")
@@ -26,29 +26,13 @@ source(here("R", "visualize_iperf.R"))
 
 # Create directory structure if it doesn't exist
 dir.create(here("data", "raw", "tcp"), recursive = TRUE, showWarnings = FALSE)
-# dir.create(here("data", "raw", "udp"), recursive = TRUE, showWarnings = FALSE) # No longer needed
 dir.create(here("data", "processed"), recursive = TRUE, showWarnings = FALSE)
 dir.create(here("output", "figures"), recursive = TRUE, showWarnings = FALSE)
 dir.create(here("output", "reports"), recursive = TRUE, showWarnings = FALSE)
 
-# Function to determine if an iperf file is TCP or UDP
-identify_protocol <- function(file_path) {
-  tryCatch({
-    data <- fromJSON(file_path)
-    if (data$start$test_start$protocol == "UDP") {
-      return("UDP")
-    } else {
-      return("TCP")
-    }
-  }, error = function(e) {
-    warning(paste("Could not parse file:", file_path, "-", e$message))
-    return(NA)
-  })
-}
-
-# Process files from the external input directory (simplify)
+# Process files from the external input directory
 process_input_files <- function() {
-  cat("Looking for iperf TCP files in:", IPERF_INPUT_DIR, "\n")
+  cat("Looking for iperf files in:", IPERF_INPUT_DIR, "\n")
   
   # Check if input directory exists
   if (!dir.exists(IPERF_INPUT_DIR)) {
@@ -63,52 +47,37 @@ process_input_files <- function() {
     return(character(0))
   }
   
-  cat("Found", length(input_files), "JSON files.\n")
-  
-  # Validate that files are TCP
-  tcp_files <- character(0)
-  for (file in input_files) {
-    # Try to confirm it's TCP
-    protocol <- identify_protocol(file)
-    if (!is.na(protocol) && protocol == "TCP") {
-      tcp_files <- c(tcp_files, file)
-    } else {
-      warning(paste("Skipping non-TCP file:", file))
-    }
-  }
-  
-  cat("- Valid TCP files:", length(tcp_files), "\n")
+  cat("Found", length(input_files), "iperf JSON files.\n")
   
   # Copy files to project structure if configured to do so
   if (COPY_FILES_TO_PROJECT) {
     cat("Copying files to project structure...\n")
     
-    # Copy TCP files
-    for (file in tcp_files) {
+    for (file in input_files) {
       dest <- here("data", "raw", "tcp", basename(file))
       file.copy(file, dest, overwrite = TRUE)
     }
     
     # Use the local copies for processing
-    tcp_files <- list.files(here("data", "raw", "tcp"), pattern = "\\.json$", full.names = TRUE)
+    input_files <- list.files(here("data", "raw", "tcp"), pattern = "\\.json$", full.names = TRUE)
   }
   
-  return(tcp_files)
+  return(input_files)
 }
 
 # Main processing function for TCP data
 process_tcp_data <- function(tcp_files) {
   if (length(tcp_files) == 0) {
-    cat("No TCP files to process.\n")
+    cat("No iperf files to process.\n")
     return(NULL)
   }
   
-  cat("Processing TCP data...\n")
+  cat("Processing iperf data...\n")
   
   # Parse the raw JSON files
   tcp_data <- process_iperf_files(tcp_files)
   if (is.null(tcp_data) || nrow(tcp_data) == 0) {
-    cat("No valid TCP data found in files.\n")
+    cat("No valid data found in files.\n")
     return(NULL)
   }
   
@@ -129,7 +98,16 @@ process_tcp_data <- function(tcp_files) {
   cat("Creating basic TCP visualizations...\n")
   for (file in unique(tcp_data$file)) {
     single_test <- tcp_data %>% filter(file == !!file)
-    p <- plot_throughput(single_test, paste("TCP Throughput:", file))
+    
+    # Use human-readable datetime if available for better titles
+    if("datetime_readable" %in% names(single_test)) {
+      test_date <- first(single_test$datetime_readable)
+      title <- paste("TCP Throughput:", file, "-", test_date)
+    } else {
+      title <- paste("TCP Throughput:", file)
+    }
+    
+    p <- plot_throughput(single_test, title)
     ggsave(here("output", "figures", paste0("tcp_", gsub("\\.json$", "", file), ".png")), 
            p, width = 10, height = 8)
   }
@@ -153,7 +131,7 @@ process_tcp_data <- function(tcp_files) {
   
   # Segment analysis - if we have enough data for at least 2 segments
   if (nrow(tcp_data) >= 10) {
-    segment_size <- min(10, max(tcp_data$interval_end) / 5) # Ensure at least 5 segments
+    segment_size <- min(10, max(tcp_data$interval_end, na.rm = TRUE) / 5) # Ensure at least 5 segments
     tcp_segments <- analyze_segments(tcp_data, segment_size)
     saveRDS(tcp_segments, here("data", "processed", "tcp_segments.rds"))
     write_csv(tcp_segments, here("output", "reports", "tcp_segments.csv"))
@@ -184,10 +162,17 @@ process_tcp_data <- function(tcp_files) {
     ggsave(here("output", "figures", "tcp_anomalies.png"), p_anomalies, width = 10, height = 6)
   }
   
-  # Add inside the TCP processing section
+  # Create the enhanced visualization
   if(nrow(tcp_data) > 0) {
-    # Create the enhanced visualization
-    p_detailed <- plot_throughput_detailed(tcp_data, paste("TCP Test:", unique(tcp_data$file)))
+    # Add human-readable datetime to title if available
+    if("datetime_readable" %in% names(tcp_data) && length(unique(tcp_data$file)) == 1) {
+      test_date <- first(tcp_data$datetime_readable)
+      title <- paste("TCP Test:", unique(tcp_data$file), "-", test_date)
+    } else {
+      title <- paste("TCP Test:", paste(unique(tcp_data$file), collapse=", "))
+    }
+    
+    p_detailed <- plot_throughput_detailed(tcp_data, title)
     ggsave(here("output", "figures", "tcp_detailed_analysis.png"), 
            p_detailed, width = 15, height = 10, dpi = 300)
     
@@ -196,15 +181,95 @@ process_tcp_data <- function(tcp_files) {
            p_detailed, width = 20, height = 15, dpi = 150)
   }
   
+  # Create additional visualizations and reports
+  if (!is.null(tcp_data) && nrow(tcp_data) > 0) {
+    cat("Generating enhanced visualizations...\n")
+    
+    # Create dashboard and save it
+    dashboard <- create_performance_dashboard(tcp_data)
+    ggsave(here("output", "figures", "network_performance_dashboard.png"), 
+           dashboard, width = 14, height = 10)
+    
+    # Generate stability analysis
+    stability_metrics <- calculate_stability_metrics(tcp_data)
+    write_csv(stability_metrics, here("output", "reports", "stability_metrics.csv"))
+    
+    # Generate time-of-day analysis
+    tod_summary <- group_by_time_of_day(tcp_data)
+    write_csv(tod_summary, here("output", "reports", "time_of_day_summary.csv"))
+    
+    # Check for anomalies
+    anomalies <- detect_anomalies(tcp_data)
+    if (nrow(anomalies) > 0) {
+      write_csv(anomalies, here("output", "reports", "performance_anomalies.csv"))
+      cat("Note: Detected", nrow(anomalies), "anomalous test(s).\n")
+    }
+    
+    cat("Enhanced visualizations and reports created successfully.\n")
+  }
+  
+  # Time-based analysis - use datetime field safely
+  if ("test_datetime" %in% names(tcp_data) && 
+      !all(is.na(tcp_data$test_datetime)) && 
+      length(unique(tcp_data$test_datetime[!is.na(tcp_data$test_datetime)])) >= 2) {
+    
+    cat("Generating time-based comparisons...\n")
+    
+    # Time series comparison
+    p_time_series <- plot_time_series_comparison(tcp_data, color_by = "file", max_series = 8)
+    ggsave(here("output", "figures", "time_series_comparison.png"), 
+           p_time_series, width = 12, height = 10)
+    
+    # Performance trends over time
+    p_trends <- plot_performance_trends(tcp_data, time_unit = "day")
+    ggsave(here("output", "figures", "performance_trends.png"), 
+           p_trends, width = 12, height = 8)
+    
+    # Time patterns heatmap
+    p_patterns <- plot_time_pattern_heatmap(tcp_data)
+    ggsave(here("output", "figures", "time_pattern_heatmap.png"), 
+           p_patterns, width = 10, height = 8)
+    
+    # Generate time period comparisons
+    time_periods <- compare_time_periods(tcp_data, period_var = "hour", include_users = TRUE)
+    write_csv(time_periods, here("output", "reports", "time_period_comparison.csv"))
+    
+    # Time trends analysis
+    time_trends <- analyze_time_trends(tcp_data, time_unit = "day")
+    write_csv(time_trends, here("output", "reports", "time_trends.csv"))
+    
+    cat("Time-based analysis complete!\n")
+  }
+  
+  # If we have data from multiple users
+  if(!is.null(tcp_data) && "user_name" %in% names(tcp_data) && length(unique(tcp_data$user_name)) > 1) {
+    cat("Generating multi-user time comparisons...\n")
+    
+    # User time series comparison
+    p_user_time <- plot_time_series_comparison(tcp_data, color_by = "user_name")
+    ggsave(here("output", "figures", "user_time_series.png"), 
+           p_user_time, width = 12, height = 10)
+    
+    # User trends
+    p_user_trends <- plot_performance_trends(tcp_data, facet_by = "user_name")
+    ggsave(here("output", "figures", "user_performance_trends.png"), 
+           p_user_trends, width = 14, height = 10)
+    
+    # User time patterns
+    p_user_patterns <- plot_time_pattern_heatmap(tcp_data, facet_by = "user_name")
+    ggsave(here("output", "figures", "user_time_patterns.png"), 
+           p_user_patterns, width = 14, height = 10)
+  }
+  
   return(tcp_data)
 }
 
-# Generate aggregated report (simplified for TCP only)
+# Generate summary report for TCP tests with enhanced metadata
 create_summary_report <- function(tcp_data = NULL) {
   cat("Generating summary report...\n")
   
   # Create report content
-  report <- c("# iperf TCP Data Analysis Summary Report", 
+  report <- c("# iperf3 TCP Data Analysis Summary Report", 
               paste0("Generated: ", format(Sys.time(), "%Y-%m-%d %H:%M:%S")),
               "",
               "## Analysis Overview",
@@ -221,17 +286,43 @@ create_summary_report <- function(tcp_data = NULL) {
                          paste(unique_users, collapse=", "))
     }
     
+    # Include ISP information if available
+    isp_text <- ""
+    if ("isp" %in% names(tcp_data)) {
+      unique_isps <- unique(tcp_data$isp)
+      isp_text <- paste0("* ISPs tested: ", paste(unique_isps, collapse=", "), "\n")
+    }
+    
+    # Include date range if available
+    date_range_text <- ""
+    if ("datetime_readable" %in% names(tcp_data) && !all(is.na(tcp_data$datetime_readable))) {
+      date_values <- na.omit(tcp_data$datetime_readable)
+      if (length(date_values) > 0) {
+        date_range_text <- paste0("* Test period: ", min(date_values), " to ", max(date_values), "\n")
+      }
+    } else if ("test_datetime" %in% names(tcp_data) && !all(is.na(tcp_data$test_datetime))) {
+      date_values <- na.omit(tcp_data$test_datetime)
+      if (length(date_values) > 0) {
+        date_range_text <- paste0("* Test period: ", 
+                                format(min(date_values), "%Y-%m-%d %H:%M:%S"), " to ", 
+                                format(max(date_values), "%Y-%m-%d %H:%M:%S"), "\n")
+      }
+    }
+    
     report <- c(report,
                 "### TCP Tests",
                 paste0("* Number of TCP tests: ", length(tcp_files)),
                 paste0("* Files analyzed: ", paste(tcp_files, collapse=", ")),
                 user_text,
+                isp_text,
+                date_range_text,
                 paste0("* Total data points: ", nrow(tcp_data)),
-                paste0("* Average throughput: ", round(mean(tcp_data$bitrate_mbps), 2), " Mbps"),
-                paste0("* Max throughput: ", round(max(tcp_data$bitrate_mbps), 2), " Mbps"),
+                paste0("* Average throughput: ", round(mean(tcp_data$bitrate_mbps, na.rm = TRUE), 2), " Mbps"),
+                paste0("* Max throughput: ", round(max(tcp_data$bitrate_mbps, na.rm = TRUE), 2), " Mbps"),
                 "")
   }
   
+  # Enhanced reporting of output files
   report <- c(report,
               "## Output Files",
               "",
@@ -239,21 +330,40 @@ create_summary_report <- function(tcp_data = NULL) {
               "* TCP raw data: `data/processed/tcp_data.rds`",
               "* TCP detailed report: `output/reports/tcp_detailed.csv`",
               "* TCP summary stats: `output/reports/tcp_summary.csv`",
+              ifelse(file.exists(here("output", "reports", "time_period_comparison.csv")), 
+                    "* Time period analysis: `output/reports/time_period_comparison.csv`", ""),
+              ifelse(file.exists(here("output", "reports", "stability_metrics.csv")),
+                    "* Stability metrics: `output/reports/stability_metrics.csv`", ""),
+              ifelse(file.exists(here("output", "reports", "time_of_day_summary.csv")),
+                    "* Time-of-day summary: `output/reports/time_of_day_summary.csv`", ""),
+              ifelse(file.exists(here("output", "reports", "user_summary.csv")),
+                    "* User summary: `output/reports/user_summary.csv`", ""),
               "",
               "### Visualizations",
               "* Individual test throughput: `output/figures/tcp_*.png`",
-              "* Performance heatmaps: `output/figures/tcp_heatmap.png`",
-              "* Anomaly detection: `output/figures/tcp_anomalies.png`",
-              "* User comparisons: `output/figures/user_comparison.png`",
+              "* Network dashboard: `output/figures/network_performance_dashboard.png`",
+              ifelse(file.exists(here("output", "figures", "tcp_heatmap.png")),
+                    "* Performance heatmaps: `output/figures/tcp_heatmap.png`", ""),
+              ifelse(file.exists(here("output", "figures", "tcp_anomalies.png")),
+                    "* Anomaly detection: `output/figures/tcp_anomalies.png`", ""),
+              ifelse(file.exists(here("output", "figures", "user_comparison.png")),
+                    "* User comparisons: `output/figures/user_comparison.png`", ""),
+              ifelse(file.exists(here("output", "figures", "time_series_comparison.png")),
+                    "* Time series: `output/figures/time_series_comparison.png`", ""),
+              ifelse(file.exists(here("output", "figures", "performance_trends.png")),
+                    "* Performance trends: `output/figures/performance_trends.png`", ""),
               "")
+  
+  # Remove empty strings
+  report <- report[report != ""]
   
   # Write report to file
   writeLines(report, here("output", "reports", "analysis_summary.md"))
   cat("Summary report saved to:", here("output", "reports", "analysis_summary.md"), "\n")
 }
 
-# MAIN EXECUTION FLOW (simplified)
-cat("\n========== iperf TCP Data Analysis ==========\n")
+# MAIN EXECUTION FLOW
+cat("\n========== iperf TCP Network Analysis ==========\n")
 
 # Process input files
 tcp_files <- process_input_files()
@@ -261,8 +371,8 @@ tcp_files <- process_input_files()
 # Process TCP data
 tcp_data <- process_tcp_data(tcp_files)
 
-# Generate summary report with just TCP data
-create_summary_report(tcp_data)  # TCP data only
+# Generate summary report
+create_summary_report(tcp_data)
 
 # Create user comparisons if we have multiple users
 if(!is.null(tcp_data) && nrow(tcp_data) > 0 && "user_name" %in% names(tcp_data)) {
@@ -279,13 +389,14 @@ if(!is.null(tcp_data) && nrow(tcp_data) > 0 && "user_name" %in% names(tcp_data))
     user_summary <- tcp_data %>%
       group_by(user_name, isp) %>%
       summarize(
-        avg_throughput = mean(bitrate_mbps),
-        median_throughput = median(bitrate_mbps),
-        min_throughput = min(bitrate_mbps),
-        max_throughput = max(bitrate_mbps),
+        avg_throughput = mean(bitrate_mbps, na.rm = TRUE),
+        median_throughput = median(bitrate_mbps, na.rm = TRUE),
+        min_throughput = min(bitrate_mbps, na.rm = TRUE),
+        max_throughput = max(bitrate_mbps, na.rm = TRUE),
         test_count = n_distinct(file),
         data_points = n(),
-        test_date = first(test_date),
+        # Use date_formatted if available
+        test_date = if("date_formatted" %in% names(.)) first(date_formatted) else as.character(first(test_datetime)),
         .groups = "drop"
       )
     

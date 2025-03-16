@@ -4,11 +4,11 @@ library(zoo)  # For rolling averages
 
 #' Calculate summary statistics for iperf3 test data
 #'
-#' @param data Tibble of processed iperf3 data
+#' @param data Tibble of processed TCP iperf3 data
 #' @return Tibble with summary statistics
 summarize_iperf_data <- function(data) {
-  result <- data %>%
-    group_by(protocol, file, user_name, isp) %>%
+  data %>%
+    group_by(file, user_name, isp) %>%
     summarize(
       # Basic statistics
       avg_bitrate_mbps = mean(bitrate_mbps),
@@ -27,43 +27,11 @@ summarize_iperf_data <- function(data) {
       
       .groups = "drop"
     )
-  
-  # Add UDP-specific metrics if available
-  if("lost_percent" %in% names(data)) {
-    udp_summary <- data %>%
-      filter(protocol == "UDP") %>%
-      group_by(protocol, file, user_name, isp) %>%
-      summarize(
-        # Basic UDP stats
-        avg_jitter_ms = mean(jitter_ms),
-        max_jitter_ms = max(jitter_ms),
-        median_jitter_ms = median(jitter_ms),
-        sd_jitter_ms = sd(jitter_ms),
-        
-        # Packet stats
-        total_packets = sum(packets_total),
-        lost_packets = sum(packets_lost),
-        overall_loss_percent = lost_packets / total_packets * 100,
-        
-        # Max packet loss interval
-        max_loss_percent = max(lost_percent),
-        
-        # Correlation between jitter and loss
-        jitter_loss_correlation = cor(jitter_ms, lost_percent, use = "complete.obs"),
-        
-        .groups = "drop"
-      )
-    
-    result <- result %>%
-      left_join(udp_summary, by = c("protocol", "file", "user_name", "isp"))
-  }
-  
-  return(result)
 }
 
 #' Segment analysis - break down performance by time periods
 #'
-#' @param data Tibble of processed iperf3 data
+#' @param data Tibble of processed TCP iperf3 data
 #' @param segment_size Size of each segment in seconds (default: 10)
 #' @return Tibble with segment statistics
 analyze_segments <- function(data, segment_size = 10) {
@@ -73,7 +41,7 @@ analyze_segments <- function(data, segment_size = 10) {
   
   # Analyze each segment
   segment_analysis <- data_with_segments %>%
-    group_by(protocol, file, user_name, isp, segment) %>%
+    group_by(file, user_name, isp, segment) %>%
     summarize(
       start_time = min(interval_start),
       end_time = max(interval_end),
@@ -83,27 +51,12 @@ analyze_segments <- function(data, segment_size = 10) {
       .groups = "drop"
     )
   
-  # Add UDP-specific segment analysis if available
-  if("lost_percent" %in% names(data)) {
-    udp_segments <- data_with_segments %>%
-      filter(protocol == "UDP") %>%
-      group_by(protocol, file, user_name, isp, segment) %>%
-      summarize(
-        avg_jitter_ms = mean(jitter_ms),
-        avg_loss_percent = mean(lost_percent),
-        .groups = "drop"
-      )
-    
-    segment_analysis <- segment_analysis %>%
-      left_join(udp_segments, by = c("protocol", "file", "user_name", "isp", "segment"))
-  }
-  
   return(segment_analysis)
 }
 
 #' Analyze throughput stability
 #'
-#' @param data Tibble of processed iperf3 data
+#' @param data Tibble of processed TCP iperf3 data
 #' @param window_size Size of rolling window for calculations (default: 5)
 #' @return Tibble with stability metrics
 analyze_stability <- function(data, window_size = 5) {
@@ -126,15 +79,6 @@ analyze_stability <- function(data, window_size = 5) {
         rolling_cv = rolling_sd_mbps / rolling_avg_mbps * 100
       )
     
-    # Add UDP-specific rolling metrics if available
-    if("jitter_ms" %in% names(data_sorted)) {
-      stability_metrics <- stability_metrics %>%
-        mutate(
-          rolling_avg_jitter = rollmean(jitter_ms, window_size, fill = NA, align = "right"),
-          rolling_avg_loss = rollmean(lost_percent, window_size, fill = NA, align = "right")
-        )
-    }
-    
     return(stability_metrics)
   } else {
     warning("Not enough data points for stability analysis. Need at least ", window_size, " intervals.")
@@ -149,7 +93,7 @@ analyze_stability <- function(data, window_size = 5) {
 
 #' Identify anomalies in the throughput data
 #'
-#' @param data Tibble of processed iperf3 data
+#' @param data Tibble of processed TCP iperf3 data
 #' @param threshold Number of standard deviations to consider as anomaly (default: 2)
 #' @return Tibble with anomaly indicators
 detect_anomalies <- function(data, threshold = 2) {
@@ -179,7 +123,7 @@ detect_anomalies <- function(data, threshold = 2) {
 
 #' Compare performance between different tests
 #'
-#' @param data Tibble of processed iperf3 data
+#' @param data Tibble of processed TCP iperf3 data
 #' @param group_var Variable to group by (e.g., "network", "time_of_day")
 #' @return Analysis results
 compare_tests <- function(data, group_var) {
@@ -188,7 +132,7 @@ compare_tests <- function(data, group_var) {
   }
   
   comparison <- data %>%
-    group_by(protocol, !!sym(group_var)) %>%
+    group_by(!!sym(group_var)) %>%
     summarize(
       avg_bitrate_mbps = mean(bitrate_mbps),
       sd_bitrate_mbps = sd(bitrate_mbps),
@@ -197,6 +141,218 @@ compare_tests <- function(data, group_var) {
       max_bitrate_mbps = max(bitrate_mbps),
       .groups = "drop"
     )
+  
+  return(comparison)
+}
+
+#' Group and summarize iperf tests by date
+#'
+#' @param tcp_data Combined dataframe of all TCP test data
+#' @return Dataframe with daily summary statistics
+group_by_date <- function(tcp_data) {
+  tcp_data %>%
+    mutate(
+      test_date = as.Date(test_datetime)
+    ) %>%
+    group_by(test_date) %>%
+    summarize(
+      avg_throughput = mean(bitrate_mbps, na.rm = TRUE),
+      median_throughput = median(bitrate_mbps, na.rm = TRUE),
+      max_throughput = max(bitrate_mbps, na.rm = TRUE),
+      min_throughput = min(bitrate_mbps, na.rm = TRUE),
+      stability = sd(bitrate_mbps, na.rm = TRUE),
+      stability_pct = sd(bitrate_mbps, na.rm = TRUE) / mean(bitrate_mbps, na.rm = TRUE) * 100,
+      test_count = length(unique(file)),
+      .groups = "drop"
+    )
+}
+
+#' Group and summarize iperf tests by time of day
+#'
+#' @param tcp_data Combined dataframe of all TCP test data
+#' @param hour_bins Number of bins for grouping hours (default: 4, resulting in 6-hour periods)
+#' @return Dataframe with time-of-day summary statistics
+group_by_time_of_day <- function(tcp_data, hour_bins = 4) {
+  tcp_data %>%
+    mutate(
+      hour = hour(test_datetime),
+      time_period = case_when(
+        hour >= 0 & hour < 6 ~ "Night (12AM-6AM)",
+        hour >= 6 & hour < 12 ~ "Morning (6AM-12PM)",
+        hour >= 12 & hour < 18 ~ "Afternoon (12PM-6PM)",
+        hour >= 18 & hour < 24 ~ "Evening (6PM-12AM)"
+      )
+    ) %>%
+    group_by(time_period) %>%
+    summarize(
+      avg_throughput = mean(bitrate_mbps, na.rm = TRUE),
+      median_throughput = median(bitrate_mbps, na.rm = TRUE),
+      max_throughput = max(bitrate_mbps, na.rm = TRUE),
+      min_throughput = min(bitrate_mbps, na.rm = TRUE),
+      stability = sd(bitrate_mbps, na.rm = TRUE),
+      test_count = length(unique(file)),
+      .groups = "drop"
+    ) %>%
+    # Sort by time of day
+    mutate(time_period = factor(time_period, 
+                              levels = c("Morning (6AM-12PM)", 
+                                         "Afternoon (12PM-6PM)",
+                                         "Evening (6PM-12AM)", 
+                                         "Night (12AM-6AM)"))) %>%
+    arrange(time_period)
+}
+
+#' Detect anomalies in iperf tests
+#'
+#' @param tcp_data Combined dataframe of all TCP test data
+#' @param threshold_z Standard deviations from mean to consider an anomaly
+#' @return Dataframe with identified anomalies
+detect_anomalies <- function(tcp_data, threshold_z = 2) {
+  # Calculate overall stats
+  overall_mean <- mean(tcp_data$bitrate_mbps, na.rm = TRUE)
+  overall_sd <- sd(tcp_data$bitrate_mbps, na.rm = TRUE)
+  
+  # Identify tests with anomalous performance
+  tcp_data %>%
+    group_by(file) %>%
+    summarize(
+      avg_throughput = mean(bitrate_mbps, na.rm = TRUE),
+      max_throughput = max(bitrate_mbps, na.rm = TRUE),
+      min_throughput = min(bitrate_mbps, na.rm = TRUE),
+      z_score = (avg_throughput - overall_mean) / overall_sd,
+      is_anomaly = abs(z_score) > threshold_z,
+      direction = if_else(z_score > 0, "above average", "below average"),
+      test_datetime = first(test_datetime),
+      .groups = "drop"
+    ) %>%
+    filter(is_anomaly) %>%
+    arrange(desc(abs(z_score)))
+}
+
+#' Calculate stability metrics for tests
+#'
+#' @param tcp_data Combined dataframe of all TCP test data
+#' @return Dataframe with stability metrics for each test
+calculate_stability_metrics <- function(tcp_data) {
+  tcp_data %>%
+    group_by(file) %>%
+    summarize(
+      avg_throughput = mean(bitrate_mbps, na.rm = TRUE),
+      median_throughput = median(bitrate_mbps, na.rm = TRUE),
+      throughput_sd = sd(bitrate_mbps, na.rm = TRUE),
+      cv = throughput_sd / avg_throughput * 100, # Coefficient of variation (%)
+      range = max(bitrate_mbps, na.rm = TRUE) - min(bitrate_mbps, na.rm = TRUE),
+      range_pct = range / avg_throughput * 100,
+      test_datetime = first(test_datetime),
+      user_name = first(user_name),
+      isp = first(isp),
+      .groups = "drop"
+    ) %>%
+    arrange(desc(cv)) # Sort by most variable first
+}
+
+#' Analyze performance trends over time across multiple tests
+#'
+#' @param tcp_data Combined dataframe of all TCP test data
+#' @param time_unit Unit for grouping time ('day', 'week', 'month', 'hour', etc.)
+#' @return Dataframe with time trends analysis
+analyze_time_trends <- function(tcp_data, time_unit = "day") {
+  # Ensure we have datetime information
+  if(is.null(tcp_data$test_datetime) || all(is.na(tcp_data$test_datetime))) {
+    stop("Test datetime information is missing")
+  }
+  
+  # Format time based on the requested unit
+  tcp_data <- tcp_data %>%
+    mutate(
+      time_group = case_when(
+        time_unit == "hour" ~ floor_date(test_datetime, "hour"),
+        time_unit == "day" ~ as.Date(test_datetime),
+        time_unit == "week" ~ floor_date(test_datetime, "week"),
+        time_unit == "month" ~ floor_date(test_datetime, "month"),
+        TRUE ~ as.Date(test_datetime)  # Default to day
+      )
+    )
+  
+  # Group and analyze by time period
+  time_trends <- tcp_data %>%
+    group_by(time_group) %>%
+    summarize(
+      test_count = n_distinct(file),
+      user_count = n_distinct(user_name),
+      avg_throughput = mean(bitrate_mbps, na.rm = TRUE),
+      median_throughput = median(bitrate_mbps, na.rm = TRUE),
+      p95_throughput = quantile(bitrate_mbps, 0.95, na.rm = TRUE),
+      stability = sd(bitrate_mbps, na.rm = TRUE),
+      stability_pct = stability / avg_throughput * 100,
+      data_points = n(),
+      .groups = "drop"
+    ) %>%
+    arrange(time_group)
+  
+  # Calculate trend indicators
+  if(nrow(time_trends) > 1) {
+    time_trends <- time_trends %>%
+      mutate(
+        throughput_change = c(NA, diff(avg_throughput)),
+        throughput_change_pct = throughput_change / lag(avg_throughput) * 100,
+        trend = case_when(
+          is.na(throughput_change) ~ "initial",
+          throughput_change > 0 ~ "improving",
+          throughput_change < 0 ~ "degrading",
+          TRUE ~ "stable"
+        )
+      )
+  }
+  
+  return(time_trends)
+}
+
+#' Compare performance between different time periods and users
+#'
+#' @param tcp_data Combined dataframe of all TCP test data
+#' @param period_var Variable to use for period grouping ('hour', 'day_of_week', 'month', etc.)
+#' @param include_users Whether to break down by user (default: TRUE)
+#' @return Dataframe comparing performance across time periods
+compare_time_periods <- function(tcp_data, period_var = "hour", include_users = TRUE) {
+  # Create period groupings
+  tcp_data <- tcp_data %>%
+    mutate(
+      hour = hour(test_datetime),
+      day_of_week = wday(test_datetime, label = TRUE),
+      month = month(test_datetime, label = TRUE),
+      quarter = quarter(test_datetime)
+    )
+  
+  # Validate the requested period variable exists
+  if(!period_var %in% c("hour", "day_of_week", "month", "quarter")) {
+    stop("Invalid period_var. Use 'hour', 'day_of_week', 'month', or 'quarter'")
+  }
+  
+  # Group data
+  if(include_users && "user_name" %in% names(tcp_data)) {
+    comparison <- tcp_data %>%
+      group_by(user_name, isp, !!sym(period_var)) %>%
+      summarize(
+        avg_throughput = mean(bitrate_mbps, na.rm = TRUE),
+        median_throughput = median(bitrate_mbps, na.rm = TRUE),
+        stability = sd(bitrate_mbps, na.rm = TRUE) / mean(bitrate_mbps, na.rm = TRUE) * 100,
+        test_count = n_distinct(file),
+        data_points = n(),
+        .groups = "drop"
+      )
+  } else {
+    comparison <- tcp_data %>%
+      group_by(!!sym(period_var)) %>%
+      summarize(
+        avg_throughput = mean(bitrate_mbps, na.rm = TRUE),
+        median_throughput = median(bitrate_mbps, na.rm = TRUE),
+        stability = sd(bitrate_mbps, na.rm = TRUE) / mean(bitrate_mbps, na.rm = TRUE) * 100,
+        test_count = n_distinct(file),
+        data_points = n(),
+        .groups = "drop"
+      )
+  }
   
   return(comparison)
 }

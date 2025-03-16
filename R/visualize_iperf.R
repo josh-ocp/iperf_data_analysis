@@ -1,6 +1,7 @@
 library(tidyverse)
 library(patchwork)  # For combining plots
 library(scales)     # For nice formatting
+library(lubridate)
 
 #' Plot throughput over time for a single test
 #'
@@ -497,5 +498,413 @@ plot_throughput_detailed <- function(data, title = "Network Throughput") {
   }
   
   # For single data point, just return the main plot
+  return(p)
+}
+
+#' Plot summary of throughput by date
+#'
+#' @param tcp_data Combined dataframe of all TCP test data
+#' @return A ggplot object
+plot_daily_summary <- function(tcp_data) {
+  daily_data <- group_by_date(tcp_data)
+  
+  ggplot(daily_data, aes(x = test_date)) +
+    geom_line(aes(y = avg_throughput), size = 1, color = "steelblue") +
+    geom_ribbon(aes(ymin = min_throughput, ymax = max_throughput),
+                alpha = 0.2, fill = "steelblue") +
+    labs(
+      title = "Daily Network Performance Summary",
+      subtitle = paste("Based on", length(unique(tcp_data$file)), "iperf tests"),
+      x = "Date",
+      y = "Throughput (Mbps)",
+      caption = "Ribbon shows min-max range, line shows average"
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold"),
+      axis.title = element_text(face = "bold"),
+      legend.position = "bottom"
+    )
+}
+
+#' Plot throughput by time of day
+#'
+#' @param tcp_data Combined dataframe of all TCP test data
+#' @return A ggplot object
+plot_time_of_day <- function(tcp_data) {
+  tod_data <- group_by_time_of_day(tcp_data)
+  
+  ggplot(tod_data, aes(x = time_period, y = avg_throughput)) +
+    geom_col(fill = "steelblue", alpha = 0.8) +
+    geom_errorbar(aes(ymin = avg_throughput - stability, 
+                      ymax = avg_throughput + stability),
+                  width = 0.2) +
+    labs(
+      title = "Network Performance by Time of Day",
+      subtitle = "Average throughput with standard deviation",
+      x = "Time of Day",
+      y = "Throughput (Mbps)",
+      caption = paste0("Based on ", length(unique(tcp_data$file)), " tests")
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold"),
+      axis.title = element_text(face = "bold"),
+      axis.text.x = element_text(angle = 45, hjust = 1)
+    )
+}
+
+#' Create a heatmap of throughput over time
+#'
+#' @param tcp_data Combined dataframe of all TCP test data
+#' @return A ggplot object
+plot_throughput_heatmap <- function(tcp_data) {
+  # Ensure we have datetime
+  if(!"hour" %in% colnames(tcp_data)) {
+    tcp_data <- tcp_data %>%
+      mutate(
+        hour = hour(test_datetime),
+        day = day(test_datetime)
+      )
+  }
+  
+  # Aggregate by hour and day
+  heatmap_data <- tcp_data %>%
+    group_by(day, hour) %>%
+    summarize(
+      avg_throughput = mean(bitrate_mbps, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  ggplot(heatmap_data, aes(x = hour, y = day, fill = avg_throughput)) +
+    geom_tile() +
+    scale_fill_viridis_c(name = "Mbps", option = "plasma") +
+    scale_x_continuous(breaks = seq(0, 23, 3),
+                      labels = paste0(seq(0, 23, 3), ":00")) +
+    labs(
+      title = "Throughput Heatmap by Hour and Day",
+      x = "Hour of Day",
+      y = "Day of Month",
+      caption = "Color indicates average throughput"
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold"),
+      axis.title = element_text(face = "bold"),
+      legend.position = "right"
+    )
+}
+
+#' Create a boxplot comparison of tests
+#'
+#' @param tcp_data Combined dataframe of all TCP test data
+#' @param max_tests Maximum number of tests to include (to avoid clutter)
+#' @return A ggplot object
+plot_test_comparison_boxplot <- function(tcp_data, max_tests = 8) {
+  # If we have too many tests, select the most recent ones
+  if(length(unique(tcp_data$file)) > max_tests) {
+    test_dates <- tcp_data %>%
+      group_by(file) %>%
+      summarize(test_datetime = first(test_datetime), .groups = "drop") %>%
+      arrange(desc(test_datetime)) %>%
+      slice_head(n = max_tests)
+    
+    tcp_data <- tcp_data %>%
+      filter(file %in% test_dates$file)
+  }
+  
+  # Create simplified labels for each test based on date/time
+  tcp_data <- tcp_data %>%
+    mutate(
+      test_label = format(test_datetime, "%m-%d %H:%M")
+    )
+  
+  ggplot(tcp_data, aes(x = test_label, y = bitrate_mbps)) +
+    geom_boxplot(aes(fill = test_label), alpha = 0.7) +
+    scale_fill_viridis_d() +
+    labs(
+      title = "Comparison of Recent iperf Tests",
+      subtitle = "Distribution of throughput measurements",
+      x = "Test Date/Time",
+      y = "Throughput (Mbps)"
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold"),
+      axis.title = element_text(face = "bold"),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "none"
+    )
+}
+
+#' Create a comprehensive dashboard of test results
+#'
+#' @param tcp_data Combined dataframe of all TCP test data
+#' @return A combined ggplot object using patchwork
+create_performance_dashboard <- function(tcp_data) {
+  # Create individual plots
+  p1 <- plot_daily_summary(tcp_data)
+  p2 <- plot_time_of_day(tcp_data)
+  p3 <- plot_test_comparison_boxplot(tcp_data)
+  
+  # Create a dashboard layout
+  dashboard <- (p1 / p2) | p3
+  
+  # Add title to the dashboard
+  dashboard + plot_annotation(
+    title = "Network Performance Dashboard",
+    subtitle = paste0("Based on ", length(unique(tcp_data$file)), 
+                     " iperf tests from ", 
+                     format(min(tcp_data$test_datetime, na.rm = TRUE), "%Y-%m-%d"),
+                     " to ", 
+                     format(max(tcp_data$test_datetime, na.rm = TRUE), "%Y-%m-%d")),
+    caption = paste0("Generated: ", Sys.time()),
+    theme = theme(
+      plot.title = element_text(size = 18, face = "bold"),
+      plot.subtitle = element_text(size = 12),
+      plot.caption = element_text(size = 8, hjust = 1)
+    )
+  )
+}
+
+# Add to visualize_iperf.R
+
+#' Plot time series comparison of multiple tests
+#'
+#' @param tcp_data Combined dataframe of all TCP test data 
+#' @param color_by Variable to use for coloring (default: "file")
+#' @param max_series Maximum number of series to show (default: 10)
+#' @param smooth Whether to add smoothed trend lines (default: TRUE)
+#' @return A ggplot object
+plot_time_series_comparison <- function(tcp_data, color_by = "file", max_series = 10, smooth = TRUE) {
+  # Ensure we have proper time information
+  if(!"test_datetime" %in% names(tcp_data) || all(is.na(tcp_data$test_datetime))) {
+    stop("Test datetime information is needed for time series comparison")
+  }
+  
+  # For each file, standardize the time to start at 0
+  tcp_data <- tcp_data %>%
+    group_by(file) %>%
+    mutate(
+      relative_time = interval_start - first(interval_start),
+      actual_time = test_datetime + seconds(interval_start)
+    ) %>%
+    ungroup()
+  
+  # Get the variable to color by
+  if(!color_by %in% names(tcp_data)) {
+    warning("Color variable not found, using file name")
+    color_by <- "file"
+  }
+  
+  # Limit number of series to avoid overplotting
+  unique_values <- unique(tcp_data[[color_by]])
+  if(length(unique_values) > max_series) {
+    # If we have too many, take the most recent ones based on datetime
+    if(color_by == "file") {
+      # For files, get the most recent ones
+      newest_files <- tcp_data %>%
+        group_by(file) %>%
+        summarize(last_time = max(test_datetime), .groups = "drop") %>%
+        arrange(desc(last_time)) %>%
+        slice_head(n = max_series) %>%
+        pull(file)
+      
+      tcp_data <- tcp_data %>%
+        filter(file %in% newest_files)
+    } else {
+      # For other variables, just take the first max_series values
+      keep_values <- unique_values[1:max_series]
+      tcp_data <- tcp_data %>%
+        filter(!!sym(color_by) %in% keep_values)
+    }
+    
+    message("Limited to ", max_series, " series to avoid overplotting")
+  }
+  
+  # Plot the time series - Two options: by relative time or actual time
+  
+  # Option 1: Using relative time (aligned to start at 0)
+  p1 <- tcp_data %>%
+    ggplot(aes(x = relative_time, y = bitrate_mbps, color = !!sym(color_by), group = interaction(file, !!sym(color_by)))) +
+    geom_line(alpha = 0.7) +
+    labs(
+      title = "Network Performance Comparison Over Test Duration",
+      x = "Time from start (seconds)",
+      y = "Throughput (Mbps)",
+      color = str_to_title(gsub("_", " ", color_by))
+    ) +
+    theme_minimal()
+  
+  # Option 2: Using actual datetime
+  p2 <- tcp_data %>%
+    ggplot(aes(x = actual_time, y = bitrate_mbps, color = !!sym(color_by), group = interaction(file, !!sym(color_by)))) +
+    geom_line(alpha = 0.7) +
+    labs(
+      title = "Network Performance Over Time",
+      x = "Date/Time",
+      y = "Throughput (Mbps)",
+      color = str_to_title(gsub("_", " ", color_by))
+    ) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  # Add smoothing if requested
+  if(smooth) {
+    p1 <- p1 + geom_smooth(method = "loess", se = FALSE, span = 0.3, linewidth = 1.2)
+    p2 <- p2 + geom_smooth(method = "loess", se = FALSE, span = 0.3, linewidth = 1.2)
+  }
+  
+  # Combine the plots
+  combined <- p1 / p2 + plot_annotation(
+    title = "Network Performance Time Series Analysis",
+    subtitle = paste("Comparing", length(unique(tcp_data[[color_by]])), "different", gsub("_", " ", color_by), "values"),
+    theme = theme(plot.title = element_text(face = "bold", size = 16))
+  )
+  
+  return(combined)
+}
+
+#' Plot network performance trends over time
+#'
+#' @param tcp_data Combined dataframe of all TCP test data
+#' @param time_unit Unit for time grouping ('day', 'week', 'month', etc.)
+#' @param facet_by Optional variable to facet by (e.g., "user_name") 
+#' @return A ggplot object
+plot_performance_trends <- function(tcp_data, time_unit = "day", facet_by = NULL) {
+  # Get trends data
+  trends_data <- analyze_time_trends(tcp_data, time_unit)
+  
+  # Create base plot
+  p <- trends_data %>%
+    ggplot(aes(x = time_group, y = avg_throughput)) +
+    geom_line(size = 1, color = "steelblue") +
+    geom_point(aes(size = test_count), color = "steelblue") +
+    geom_ribbon(aes(ymin = avg_throughput - stability, 
+                    ymax = avg_throughput + stability), 
+                alpha = 0.2, fill = "steelblue") +
+    labs(
+      title = paste("Network Performance Trends by", str_to_title(time_unit)),
+      subtitle = "Average throughput with standard deviation bands",
+      x = str_to_title(time_unit),
+      y = "Throughput (Mbps)",
+      size = "Tests"
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold"),
+      axis.title = element_text(face = "bold")
+    )
+  
+  # Add faceting if requested
+  if(!is.null(facet_by) && facet_by %in% names(tcp_data)) {
+    # We need to regenerate the trends data with the facet variable
+    facet_trends <- tcp_data %>%
+      group_by(!!sym(facet_by)) %>%
+      group_modify(~ analyze_time_trends(.x, time_unit)) %>%
+      ungroup()
+    
+    # Create faceted plot
+    p <- facet_trends %>%
+      ggplot(aes(x = time_group, y = avg_throughput, color = !!sym(facet_by), fill = !!sym(facet_by))) +
+      geom_line(size = 1) +
+      geom_point(aes(size = test_count)) +
+      geom_ribbon(aes(ymin = avg_throughput - stability, 
+                      ymax = avg_throughput + stability), 
+                  alpha = 0.1) +
+      labs(
+        title = paste("Network Performance Trends by", str_to_title(time_unit)),
+        subtitle = paste("Faceted by", str_to_title(gsub("_", " ", facet_by))),
+        x = str_to_title(time_unit),
+        y = "Throughput (Mbps)",
+        size = "Tests",
+        color = str_to_title(gsub("_", " ", facet_by)),
+        fill = str_to_title(gsub("_", " ", facet_by))
+      ) +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(face = "bold"),
+        axis.title = element_text(face = "bold")
+      ) +
+      facet_wrap(vars(!!sym(facet_by)), scales = "free_y")
+  }
+  
+  return(p)
+}
+
+#' Create a day-of-week by hour heatmap of performance
+#'
+#' @param tcp_data Combined dataframe of all TCP test data
+#' @param facet_by Optional variable to facet by (e.g., "user_name")
+#' @return A ggplot object
+plot_time_pattern_heatmap <- function(tcp_data, facet_by = NULL) {
+  # Extract day of week and hour from datetime
+  heatmap_data <- tcp_data %>%
+    mutate(
+      day_of_week = wday(test_datetime, label = TRUE),
+      hour_of_day = hour(test_datetime)
+    ) %>%
+    group_by(day_of_week, hour_of_day) %>%
+    summarize(
+      avg_throughput = mean(bitrate_mbps, na.rm = TRUE),
+      test_count = n_distinct(file),
+      data_points = n(),
+      .groups = "drop"
+    )
+  
+  # Create heatmap
+  p <- heatmap_data %>%
+    ggplot(aes(x = hour_of_day, y = day_of_week, fill = avg_throughput)) +
+    geom_tile() +
+    scale_fill_viridis_c(option = "plasma", name = "Mbps") +
+    scale_x_continuous(breaks = seq(0, 23, 3),
+                     labels = c("12am", "3am", "6am", "9am", "12pm", "3pm", "6pm", "9pm")) +
+    labs(
+      title = "Performance Pattern by Day and Hour",
+      subtitle = "Average throughput (Mbps)",
+      x = "Hour of Day",
+      y = "Day of Week"
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold"),
+      axis.title = element_text(face = "bold")
+    )
+  
+  # Add faceting if requested
+  if(!is.null(facet_by) && facet_by %in% names(tcp_data)) {
+    facet_heatmap <- tcp_data %>%
+      mutate(
+        day_of_week = wday(test_datetime, label = TRUE),
+        hour_of_day = hour(test_datetime)
+      ) %>%
+      group_by(!!sym(facet_by), day_of_week, hour_of_day) %>%
+      summarize(
+        avg_throughput = mean(bitrate_mbps, na.rm = TRUE),
+        test_count = n_distinct(file),
+        data_points = n(),
+        .groups = "drop"
+      )
+    
+    p <- facet_heatmap %>%
+      ggplot(aes(x = hour_of_day, y = day_of_week, fill = avg_throughput)) +
+      geom_tile() +
+      scale_fill_viridis_c(option = "plasma", name = "Mbps") +
+      scale_x_continuous(breaks = seq(0, 23, 6),
+                       labels = c("12am", "6am", "12pm", "6pm")) +
+      labs(
+        title = "Performance Pattern by Day and Hour",
+        subtitle = paste("Faceted by", str_to_title(gsub("_", " ", facet_by))),
+        x = "Hour of Day",
+        y = "Day of Week"
+      ) +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(face = "bold"),
+        axis.title = element_text(face = "bold")
+      ) +
+      facet_wrap(vars(!!sym(facet_by)))
+  }
+  
   return(p)
 }
