@@ -1,12 +1,7 @@
 # Enhanced iperf3 Data Analysis Script for TCP Tests
 
-# Check and install required packages
-required_packages <- c("tidyverse", "jsonlite", "fs", "patchwork", "scales", "zoo", "lubridate")
-missing_packages <- required_packages[!(required_packages %in% installed.packages()[,"Package"])]
-if(length(missing_packages) > 0) {
-  cat("Installing missing packages:", paste(missing_packages, collapse=", "), "\n")
-  install.packages(missing_packages)
-}
+# Source centralized dependency management
+source(here::here("install_dependencies.R"))
 
 # Load required libraries
 library(tidyverse)

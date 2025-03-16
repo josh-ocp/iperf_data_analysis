@@ -95,6 +95,228 @@ extract_user_metadata <- function(filename) {
   return(result)
 }
 
+#' Enhanced raw iPerf3 output parsing with summary information
+#'
+#' @param file_path Path to the raw iPerf3 output file
+#' @return A data frame with structured iPerf3 data
+#' @import dplyr
+preprocess_raw_iperf <- function(file_path) {
+  # Read the file content
+  raw_lines <- readLines(file_path)
+  
+  # Identify data lines (those with interval pattern like "0.00-1.00")
+  data_pattern <- "^\\s*\\[\\s*\\d+\\]\\s+(\\d+\\.\\d+)-(\\d+\\.\\d+)\\s+sec\\s+(\\d+\\.\\d+\\s+\\w+|\\d+\\s+\\w+)\\s+(\\d+\\.\\d+\\s+\\w+/sec|\\d+\\.\\d+\\s+\\w+/sec)"
+  data_lines <- raw_lines[grep(data_pattern, raw_lines)]
+  
+  if (length(data_lines) == 0) {
+    return(NULL) # No valid data found
+  }
+  
+  # Extract connection info
+  host_line <- grep("Connecting to host", raw_lines, value = TRUE)
+  host <- if (length(host_line) > 0) {
+    sub(".*host\\s+([^,]+).*", "\\1", host_line[1])
+  } else {
+    NA_character_
+  }
+  
+  # Extract client/server info
+  conn_line <- grep("local .* port .* connected to", raw_lines, value = TRUE)
+  local_ip <- if (length(conn_line) > 0) {
+    sub(".*local\\s+(\\S+)\\s+port.*", "\\1", conn_line[1])
+  } else {
+    NA_character_
+  }
+  remote_ip <- if (length(conn_line) > 0) {
+    sub(".*connected to\\s+(\\S+)\\s+port.*", "\\1", conn_line[1])
+  } else {
+    NA_character_
+  }
+  
+  # Extract protocol information
+  protocol <- if (any(grepl("UDP", raw_lines))) "udp" else "tcp"
+  
+  # Extract summary info for total transfer and bitrate
+  summary_pattern <- ".*\\s+(\\d+(\\.\\d+)?\\s+\\w+)\\s+(\\d+(\\.\\d+)?\\s+\\w+/sec)"
+  summary_sender_line <- grep("sender", raw_lines[grep(summary_pattern, raw_lines)], value = TRUE)
+  summary_receiver_line <- grep("receiver", raw_lines[grep(summary_pattern, raw_lines)], value = TRUE)
+  
+  # Extract sender summary
+  total_sent_bytes <- NA
+  total_sent_bitrate <- NA
+  if (length(summary_sender_line) > 0) {
+    transfer_match <- regexpr("\\d+(\\.\\d+)?\\s+\\w+", summary_sender_line)
+    if (transfer_match > 0) {
+      transfer_str <- substr(summary_sender_line, transfer_match, 
+                          transfer_match + attr(transfer_match, "match.length") - 1)
+      transfer_val <- as.numeric(sub("\\s+\\w+$", "", transfer_str))
+      transfer_unit <- sub("^\\d+(\\.\\d+)?\\s+", "", transfer_str)
+      
+      # Convert to bytes
+      if (grepl("KB|KBytes", transfer_unit)) {
+        total_sent_bytes <- transfer_val * 1024
+      } else if (grepl("MB|MBytes", transfer_unit)) {
+        total_sent_bytes <- transfer_val * 1024 * 1024
+      } else if (grepl("GB|GBytes", transfer_unit)) {
+        total_sent_bytes <- transfer_val * 1024 * 1024 * 1024
+      }
+    }
+    
+    # Extract bitrate
+    bitrate_match <- regexpr("\\d+(\\.\\d+)?\\s+\\w+/sec", summary_sender_line)
+    if (bitrate_match > 0) {
+      bitrate_str <- substr(summary_sender_line, bitrate_match, 
+                         bitrate_match + attr(bitrate_match, "match.length") - 1)
+      bitrate_val <- as.numeric(sub("\\s+\\w+/sec$", "", bitrate_str))
+      bitrate_unit <- sub("^\\d+(\\.\\d+)?\\s+", "", bitrate_str)
+      
+      # Convert to Mbps
+      if (grepl("Kbits/sec|KBytes/sec", bitrate_unit)) {
+        total_sent_bitrate <- bitrate_val / 1024
+      } else if (grepl("Mbits/sec|MBytes/sec", bitrate_unit)) {
+        total_sent_bitrate <- bitrate_val
+      } else if (grepl("Gbits/sec|GBytes/sec", bitrate_unit)) {
+        total_sent_bitrate <- bitrate_val * 1024
+      }
+    }
+  }
+  
+  # Parse the data lines into a structured format
+  parsed_data <- data.frame(
+    interval_id = seq_along(data_lines),
+    stream_id = as.integer(gsub("\\D", "", regmatches(data_lines, regexpr("^\\s*\\[\\s*\\d+\\]", data_lines)))),
+    stringsAsFactors = FALSE
+  )
+  
+  # Extract interval start and end times
+  time_matches <- regmatches(data_lines, regexpr("\\d+\\.\\d+-\\d+\\.\\d+", data_lines))
+  time_parts <- strsplit(time_matches, "-")
+  parsed_data$interval_start <- as.numeric(sapply(time_parts, `[`, 1))
+  parsed_data$interval_end <- as.numeric(sapply(time_parts, `[`, 2))
+  parsed_data$interval_length <- parsed_data$interval_end - parsed_data$interval_start
+  
+  # Extract transfer amount
+  transfer_matches <- regmatches(data_lines, regexpr("\\d+(\\.\\d+)?\\s+\\w+(?=\\s+\\d+(\\.\\d+)?\\s+\\w+/sec)", data_lines))
+  parsed_data$transfer_val <- as.numeric(sub("\\s+\\w+$", "", transfer_matches))
+  parsed_data$transfer_unit <- sub("^\\d+(\\.\\d+)?\\s+", "", transfer_matches)
+  
+  # Calculate bytes based on transfer unit
+  parsed_data$bytes <- parsed_data$transfer_val
+  # Convert to bytes based on unit
+  bytes_idx <- grepl("Bytes", parsed_data$transfer_unit)
+  if (any(bytes_idx)) {
+    kb_idx <- grepl("KBytes", parsed_data$transfer_unit)
+    mb_idx <- grepl("MBytes", parsed_data$transfer_unit)
+    gb_idx <- grepl("GBytes", parsed_data$transfer_unit)
+    
+    parsed_data$bytes[kb_idx] <- parsed_data$bytes[kb_idx] * 1024
+    parsed_data$bytes[mb_idx] <- parsed_data$bytes[mb_idx] * 1024^2
+    parsed_data$bytes[gb_idx] <- parsed_data$bytes[gb_idx] * 1024^3
+  }
+  
+  # Extract bitrate
+  bitrate_matches <- regmatches(data_lines, regexpr("\\d+(\\.\\d+)?\\s+\\w+/sec", data_lines))
+  parsed_data$bitrate_val <- as.numeric(sub("\\s+\\w+/sec$", "", bitrate_matches))
+  parsed_data$bitrate_unit <- sub("^\\d+(\\.\\d+)?\\s+", "", bitrate_matches)
+  
+  # Convert to Mbps
+  parsed_data$bitrate_mbps <- parsed_data$bitrate_val
+  kbps_idx <- grepl("Kbits/sec", parsed_data$bitrate_unit)
+  gbps_idx <- grepl("Gbits/sec", parsed_data$bitrate_unit)
+  
+  parsed_data$bitrate_mbps[kbps_idx] <- parsed_data$bitrate_mbps[kbps_idx] / 1024
+  parsed_data$bitrate_mbps[gbps_idx] <- parsed_data$bitrate_mbps[gbps_idx] * 1024
+  
+  # Add connection metadata
+  parsed_data$host <- host
+  parsed_data$local_ip <- local_ip
+  parsed_data$remote_ip <- remote_ip
+  parsed_data$protocol <- protocol
+  parsed_data$total_sent_bytes <- total_sent_bytes
+  parsed_data$total_sent_bitrate <- total_sent_bitrate
+  
+  # Remove temporary columns used for conversion
+  parsed_data <- parsed_data %>%
+    select(-transfer_val, -transfer_unit, -bitrate_val, -bitrate_unit)
+  
+  return(parsed_data)
+}
+
+#' Parse iPerf3 JSON output files
+#'
+#' @param file_path Path to the iPerf3 JSON output file
+#' @return A data frame with structured iPerf3 data
+#' @import jsonlite
+parse_iperf_json <- function(file_path) {
+  tryCatch({
+    # Read the JSON file
+    json_data <- jsonlite::fromJSON(file_path)
+    
+    # Check if the file contains valid iperf3 JSON output
+    if(!("intervals" %in% names(json_data))) {
+      warning("Not a valid iPerf3 JSON file: ", file_path)
+      return(NULL)
+    }
+    
+    # Extract interval data
+    intervals <- json_data$intervals
+    
+    # Handle difference in JSON structure between iperf3 versions
+    if("streams" %in% names(intervals)) {
+      # Newer iperf3 versions have nested stream data
+      interval_data <- lapply(intervals$streams, function(stream_data) {
+        stream_id <- stream_data$socket
+        data.frame(
+          interval_id = seq_len(nrow(stream_data)),
+          stream_id = stream_id,
+          interval_start = stream_data$start,
+          interval_end = stream_data$end,
+          interval_length = stream_data$seconds,
+          bytes = stream_data$bytes,
+          bitrate_mbps = stream_data$bits_per_second / 1e6,
+          retransmits = if("retransmits" %in% names(stream_data)) stream_data$retransmits else NA_integer_,
+          stringsAsFactors = FALSE
+        )
+      })
+      parsed_data <- do.call(rbind, interval_data)
+    } else {
+      # Direct structure
+      parsed_data <- data.frame(
+        interval_id = seq_len(length(intervals)),
+        stream_id = 1,
+        interval_start = sapply(intervals, function(x) x$sum$start),
+        interval_end = sapply(intervals, function(x) x$sum$end),
+        interval_length = sapply(intervals, function(x) x$sum$seconds),
+        bytes = sapply(intervals, function(x) x$sum$bytes),
+        bitrate_mbps = sapply(intervals, function(x) x$sum$bits_per_second) / 1e6,
+        retransmits = if("retransmits" %in% names(intervals[[1]]$sum)) 
+                         sapply(intervals, function(x) x$sum$retransmits) 
+                      else rep(NA_integer_, length(intervals)),
+        stringsAsFactors = FALSE
+      )
+    }
+    
+    # Add connection metadata
+    parsed_data$host <- json_data$start$connecting_to$host
+    parsed_data$local_ip <- json_data$start$connected[[1]]$local_host
+    parsed_data$remote_ip <- json_data$start$connected[[1]]$remote_host
+    
+    # Add test summary data
+    parsed_data$total_sent_bytes <- json_data$end$sum_sent$bytes
+    parsed_data$total_received_bytes <- json_data$end$sum_received$bytes
+    parsed_data$total_sent_bitrate <- json_data$end$sum_sent$bits_per_second / 1e6
+    parsed_data$total_received_bitrate <- json_data$end$sum_received$bits_per_second / 1e6
+    
+    # Add protocol info
+    parsed_data$protocol <- tolower(json_data$start$test_start$protocol)
+    
+    return(parsed_data)
+  }, error = function(e) {
+    warning("Error parsing JSON file: ", file_path, " - ", e$message)
+    return(NULL)
+  })
+}
+
 #' Process iperf CSV files into a tidy dataframe with robust error handling
 #'
 #' @param file_paths Vector of file paths to iperf CSV files
@@ -107,17 +329,33 @@ process_iperf_files <- function(file_paths) {
     tryCatch({
       cat("Processing file:", basename(file_path), "\n")
       
-      # Read the CSV file
-      csv_data <- read_csv(file_path, show_col_types = FALSE)
+      # Check if this is a raw iPerf3 output file or a structured CSV
+      first_lines <- readLines(file_path, n = 5)
+      is_raw_iperf <- any(grepl("Connecting to host|local .* port .* connected to", first_lines))
       
-      # Check if CSV is valid
-      if(nrow(csv_data) == 0) {
-        warning("File appears to be empty: ", file_path)
-        next
+      if (is_raw_iperf) {
+        cat("Detected raw iPerf3 output file, preprocessing...\n")
+        csv_data <- preprocess_raw_iperf(file_path)
+        if (is.null(csv_data)) {
+          warning("Could not parse raw iPerf3 data from file: ", file_path)
+          next
+        }
+      } else {
+        # Original CSV reading logic
+        csv_data <- read_csv(file_path, show_col_types = FALSE)
+        
+        # Check if CSV is valid
+        if(nrow(csv_data) == 0) {
+          warning("File appears to be empty: ", file_path)
+          next
+        }
       }
       
       # Extract user metadata from filename
       metadata <- extract_user_metadata(file_path)
+      
+      # Process the data whether it came from raw or structured input
+      # Continue with existing processing logic
       
       # Expected columns for iperf CSV
       required_columns <- c("interval_start", "bitrate_mbps")

@@ -1,43 +1,104 @@
-# iperf_data_analysis
-Analyzing iperf network performance test data using R
+# iPerf Data Analysis
 
-## Overview
-This project provides tools to analyze and visualize data from iperf3 network performance tests, supporting both TCP and UDP protocols.
+This project provides tools to collect, analyze, and visualize data from iPerf3 network performance tests.
 
-## Setup
+## Project Structure
 
-1. Clone this repository
-2. Open the project in RStudio by double-clicking the `.Rproj` file
-3. Edit the `config.R` file to set the input directory where you'll place your iperf JSON files
-4. Install required packages:
-   ```r
-   install.packages(c("tidyverse", "jsonlite", "here", "patchwork", "fs"))
-   ```
+- `config.R`: Configuration settings
+- `data/`: Raw and processed iPerf data
+- `R/`: Functions for parsing, analyzing, and visualizing iPerf data
+- `scripts/`: Main processing scripts
+- `output/`: Generated results and visualizations
+- `data_collection/`: Scripts for standardized data collection
 
-## Usage
+## Workflow
 
-### Input Data
-Place your iperf3 JSON output files in the directory specified in `config.R`. The script will automatically:
-- Detect whether each file contains TCP or UDP test data
-- Copy the files to the project's data structure (optional, controlled by config setting)
-- Process and analyze the data
+### 1. Collect Data
 
-### Running the Analysis
-Run the main processing script from RStudio or the R console:
+Use the provided data collection script:
+
+```bash
+cd data_collection
+chmod +x run_iperf_test.sh
+./run_iperf_test.sh
+```
+
+Options:
+- `-s SERVER`: Server to test (can specify multiple times)
+- `-d SECONDS`: Test duration in seconds (default: 120)
+- `-u USER`: Username to record (default: current user)
+- `-j`: Use JSON output format (recommended for more reliable parsing)
+
+#### Best Practices for Data Collection
+
+**Test Setup:**
+- Use geographically diverse servers for comprehensive testing
+- Ensure test duration is at least 60 seconds (120s recommended)
+- Minimize other network activity during tests
+- Run tests at different times of day for better data variety
+
+**Recommended Command Options:**
+```bash
+# Basic test
+./run_iperf_test.sh -s speedtest.serverius.net -d 120
+
+# Advanced test with JSON output
+./run_iperf_test.sh -s speedtest.serverius.net -d 300 -j
+
+# Multiple servers
+./run_iperf_test.sh -s speedtest.serverius.net -s speedtest.london.linode.com -d 120 -j
+```
+
+See `data_collection/BEST_PRACTICES.md` for more detailed guidance.
+
+### 2. Analyze Data
+
+Copy the generated files to your input directory (set in `config.R`), then run:
 
 ```r
 source("scripts/process_all_data.R")
 ```
 
-### Output
-The analysis generates:
-- Processed data files in `data/processed/`
-- Summary statistics in `output/reports/`
-- Visualizations in `output/figures/`
+This will:
+- Parse raw iPerf3 output files
+- Clean and process the data
+- Generate performance summaries
+- Create visualizations
 
-## Project Structure
-- `config.R`: Configuration settings
-- `data/`: Raw and processed iperf data
-- `R/`: Functions for parsing, analyzing, and visualizing iperf data
-- `scripts/`: Main processing scripts
-- `output/`: Generated results and visualizations
+For customized analysis, you can also use individual scripts:
+```r
+source("scripts/parse_raw_data.R")   # Convert raw data to processed format
+source("scripts/generate_reports.R")  # Create summary reports
+source("scripts/create_plots.R")      # Generate visualizations
+```
+
+### 3. View Results
+
+Results are saved to:
+- Summary reports: `output/reports/`
+- Visualizations: `output/figures/`
+- Processed data: `data/processed/`
+
+## Supported Formats
+
+The analysis can process:
+- Raw iPerf3 text output
+- iPerf3 JSON output (recommended)
+- Pre-processed CSV files
+
+## Requirements
+
+R packages:
+- tidyverse
+- jsonlite
+- fs
+- patchwork
+- scales
+- zoo
+- lubridate
+
+## Common Issues
+
+1. **JSON parse errors**: Some iPerf3 versions may produce malformed JSON. Use raw output as fallback.
+2. **Connectivity failures**: The script attempts to ping servers first to avoid hanging.
+3. **Disk space**: Long-term testing may accumulate large data files. Monitor available space.
