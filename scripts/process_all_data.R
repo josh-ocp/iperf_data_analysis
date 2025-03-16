@@ -184,6 +184,18 @@ process_tcp_data <- function(tcp_files) {
     ggsave(here("output", "figures", "tcp_anomalies.png"), p_anomalies, width = 10, height = 6)
   }
   
+  # Add inside the TCP processing section
+  if(nrow(tcp_data) > 0) {
+    # Create the enhanced visualization
+    p_detailed <- plot_throughput_detailed(tcp_data, paste("TCP Test:", unique(tcp_data$file)))
+    ggsave(here("output", "figures", "tcp_detailed_analysis.png"), 
+           p_detailed, width = 15, height = 10, dpi = 300)
+    
+    # For larger user-friendly viewing
+    ggsave(here("output", "figures", "tcp_detailed_analysis_large.png"), 
+           p_detailed, width = 20, height = 15, dpi = 150)
+  }
+  
   return(tcp_data)
 }
 

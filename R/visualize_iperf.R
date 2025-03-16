@@ -380,3 +380,122 @@ plot_user_comparison <- function(data) {
   
   return(combined)
 }
+
+#' Plot detailed throughput over time with statistics
+#'
+#' @param data Processed iperf data with interval details
+#' @param title Plot title
+#' @return ggplot object
+plot_throughput_detailed <- function(data, title = "Network Throughput") {
+  # Sort data by time
+  data <- data %>% arrange(interval_start)
+  
+  # Calculate key statistics
+  avg_throughput <- mean(data$bitrate_mbps)
+  median_throughput <- median(data$bitrate_mbps)
+  max_throughput <- max(data$bitrate_mbps)
+  min_throughput <- min(data$bitrate_mbps)
+  
+  # Handle std_dev safely (can be NA with single data point)
+  if(nrow(data) > 1) {
+    std_dev <- sd(data$bitrate_mbps)
+    cv_percent <- (std_dev / avg_throughput) * 100 # coefficient of variation
+  } else {
+    std_dev <- 0
+    cv_percent <- 0
+  }
+  
+  # Create the detailed time series plot
+  p <- data %>%
+    ggplot(aes(x = interval_start, y = bitrate_mbps)) +
+    # Add the throughput line
+    geom_line(color = "steelblue", linewidth = 0.7) +
+    geom_point(alpha = 0.3, size = 1, color = "steelblue") +
+    # Add reference lines
+    geom_hline(yintercept = avg_throughput, 
+               linetype = "dashed", color = "darkred", linewidth = 0.8) +
+    # Add labels for reference lines
+    annotate("text", x = min(data$interval_start), 
+             y = avg_throughput * 1.05,
+             label = paste("Mean:", round(avg_throughput, 1), "Mbps"),
+             hjust = 0, color = "darkred", size = 3) +
+    # Better labels
+    labs(
+      title = title,
+      subtitle = paste0(
+        nrow(data), " intervals, ", 
+        round(max(data$interval_end) - min(data$interval_start), 1), " seconds total\n",
+        "Range: ", round(min_throughput, 1), " - ", round(max_throughput, 1), " Mbps"
+      ),
+      x = "Time (seconds)",
+      y = "Throughput (Mbps)",
+      caption = format(Sys.time(), "Generated: %Y-%m-%d %H:%M:%S")
+    ) +
+    # Improve appearance
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold"),
+      panel.grid.minor = element_blank()
+    )
+  
+  # Add standard deviation information if we have multiple data points
+  if(nrow(data) > 1) {
+    # Add shaded area for standard deviation range
+    p <- p + geom_ribbon(aes(ymin = avg_throughput - std_dev, 
+                             ymax = avg_throughput + std_dev),
+                         fill = "lightblue", alpha = 0.3)
+    
+    # Update subtitle to include std dev
+    p <- p + labs(subtitle = paste0(
+      nrow(data), " intervals, ", 
+      round(max(data$interval_end) - min(data$interval_start), 1), " seconds total\n",
+      "Range: ", round(min_throughput, 1), " - ", round(max_throughput, 1), " Mbps, ",
+      "Std Dev: ", round(std_dev, 1), " Mbps (CV: ", round(cv_percent, 1), "%)"
+    ))
+    
+    # Add median line if we have multiple data points
+    p <- p + geom_hline(yintercept = median_throughput, 
+                        linetype = "dotted", color = "darkgreen", linewidth = 0.8) +
+            annotate("text", x = min(data$interval_start), 
+                    y = median_throughput * 0.95,
+                    label = paste("Median:", round(median_throughput, 1), "Mbps"),
+                    hjust = 0, color = "darkgreen", size = 3)
+    
+    # Add trend line if we have enough points
+    if(nrow(data) >= 3) {
+      p <- p + geom_smooth(method = "loess", span = 0.2, se = FALSE, 
+                          color = "purple", linetype = "solid", linewidth = 1)
+    }
+  }
+  
+  # Create histogram of throughput distribution if we have enough data points
+  if(nrow(data) > 1) {
+    # Calculate a safe binwidth
+    safe_binwidth <- diff(range(data$bitrate_mbps)) / max(1, min(30, nrow(data)))
+    
+    p_hist <- data %>%
+      ggplot(aes(x = bitrate_mbps)) +
+      geom_histogram(binwidth = safe_binwidth, fill = "steelblue", alpha = 0.7) +
+      geom_vline(xintercept = avg_throughput, color = "darkred", 
+                linetype = "dashed", linewidth = 0.8) +
+      geom_vline(xintercept = median_throughput, color = "darkgreen", 
+                linetype = "dotted", linewidth = 0.8) +
+      labs(
+        title = "Throughput Distribution",
+        x = "Throughput (Mbps)",
+        y = "Frequency"
+      ) +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(face = "bold"),
+        panel.grid.minor = element_blank()
+      )
+    
+    # Combine with main plot
+    combined <- p / p_hist + plot_layout(heights = c(3, 1))
+    return(combined)
+  }
+  
+  # For single data point, just return the main plot
+  return(p)
+}
