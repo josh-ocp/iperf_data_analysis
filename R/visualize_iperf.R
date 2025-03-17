@@ -549,26 +549,85 @@ plot_daily_summary <- function(tcp_data) {
 #' @param tcp_data Combined dataframe of all TCP test data
 #' @return A ggplot object
 plot_time_of_day <- function(tcp_data) {
-  tod_data <- group_by_time_of_day(tcp_data)
-  
-  ggplot(tod_data, aes(x = time_period, y = avg_throughput)) +
-    geom_col(fill = "steelblue", alpha = 0.8) +
-    geom_errorbar(aes(ymin = avg_throughput - stability, 
-                      ymax = avg_throughput + stability),
-                  width = 0.2) +
-    labs(
-      title = "Network Performance by Time of Day",
-      subtitle = "Average throughput with standard deviation",
-      x = "Time of Day",
-      y = "Throughput (Mbps)",
-      caption = paste0("Based on ", length(unique(tcp_data$file)), " tests")
-    ) +
-    theme_minimal() +
-    theme(
-      plot.title = element_text(face = "bold"),
-      axis.title = element_text(face = "bold"),
-      axis.text.x = element_text(angle = 45, hjust = 1)
-    )
+  # Try to create time of day data, with error handling
+  tryCatch({
+    # Check if test_datetime is available
+    if(!"test_datetime" %in% names(tcp_data)) {
+      # Create a helpful error message plot
+      return(ggplot() + 
+        annotate("text", x = 0.5, y = 0.5, 
+                 label = "No test_datetime column found in data. Try refreshing the data or check parsing.") +
+        theme_void())
+    }
+    
+    # Check if all datetime values are NA
+    if(all(is.na(tcp_data$test_datetime))) {
+      # Try to construct datetime from individual components if available
+      if(all(c("test_date", "test_time") %in% names(tcp_data))) {
+        message("Converting test_date and test_time to test_datetime")
+        tcp_data <- tcp_data %>%
+          mutate(test_datetime = case_when(
+            !is.na(test_date) & !is.na(test_time) ~ {
+              # Parse date (assumed to be in YYYYMMDD format)
+              year <- as.integer(substr(test_date, 1, 4))
+              month <- as.integer(substr(test_date, 5, 6))
+              day <- as.integer(substr(test_date, 7, 8))
+              
+              # Parse time (assumed to be in HHMMSS format)
+              hour <- as.integer(substr(test_time, 1, 2))
+              minute <- as.integer(substr(test_time, 3, 4))
+              second <- if(nchar(test_time) >= 6) as.integer(substr(test_time, 5, 6)) else 0
+              
+              # Create datetime
+              ymd_hms(paste(year, month, day, hour, minute, second, sep="-"))
+            },
+            TRUE ~ NA_POSIXct_
+          ))
+      } else {
+        # Create a helpful error message plot
+        return(ggplot() + 
+          annotate("text", x = 0.5, y = 0.5, 
+                   label = "All test_datetime values are NA and could not reconstruct from test_date/test_time") +
+          theme_void())
+      }
+    }
+    
+    # Debug info about test_datetime
+    valid_dates <- sum(!is.na(tcp_data$test_datetime))
+    total_rows <- nrow(tcp_data)
+    message("test_datetime: ", valid_dates, "/", total_rows, " valid values (", 
+            round(valid_dates/total_rows*100, 1), "%)")
+    
+    # Now call the original implementation
+    tod_data <- group_by_time_of_day(tcp_data)
+    
+    ggplot(tod_data, aes(x = time_period, y = avg_throughput)) +
+      geom_col(fill = "steelblue", alpha = 0.8) +
+      geom_errorbar(aes(ymin = pmax(0, avg_throughput - stability), 
+                        ymax = avg_throughput + stability),
+                    width = 0.2) +
+      labs(
+        title = "Network Performance by Time of Day",
+        subtitle = paste0("Average throughput with standard deviation\n",
+                         "Based on ", valid_dates, " valid datetime values"),
+        x = "Time of Day",
+        y = "Throughput (Mbps)",
+        caption = paste0("Based on ", length(unique(tcp_data$file)), " tests")
+      ) +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(face = "bold"),
+        axis.title = element_text(face = "bold"),
+        axis.text.x = element_text(angle = 45, hjust = 1)
+      )
+  }, error = function(e) {
+    message("Error in plot_time_of_day: ", e$message)
+    # Return a blank plot with error message
+    ggplot() + 
+      annotate("text", x = 0.5, y = 0.5, 
+               label = paste0("Could not create Time of Day plot:\n", e$message)) +
+      theme_void()
+  })
 }
 
 #' Create a heatmap of throughput over time
@@ -842,64 +901,133 @@ plot_time_series_comparison <- function(tcp_data, color_by = "file", max_series 
 #' @param facet_by Optional variable to facet by (e.g., "user_name") 
 #' @return A ggplot object
 plot_performance_trends <- function(tcp_data, time_unit = "day", facet_by = NULL) {
-  # Get trends data
-  trends_data <- analyze_time_trends(tcp_data, time_unit)
-  
-  # Create base plot
-  p <- trends_data %>%
-    ggplot(aes(x = time_group, y = avg_throughput)) +
-    geom_line(size = 1, color = "steelblue") +
-    geom_point(aes(size = test_count), color = "steelblue") +
-    geom_ribbon(aes(ymin = avg_throughput - stability, 
-                    ymax = avg_throughput + stability), 
-                alpha = 0.2, fill = "steelblue") +
-    labs(
-      title = paste("Network Performance Trends by", str_to_title(time_unit)),
-      subtitle = "Average throughput with standard deviation bands",
-      x = str_to_title(time_unit),
-      y = "Throughput (Mbps)",
-      size = "Tests"
-    ) +
-    theme_minimal() +
-    theme(
-      plot.title = element_text(face = "bold"),
-      axis.title = element_text(face = "bold")
-    )
-  
-  # Add faceting if requested
-  if(!is.null(facet_by) && facet_by %in% names(tcp_data)) {
-    # We need to regenerate the trends data with the facet variable
-    facet_trends <- tcp_data %>%
-      group_by(!!sym(facet_by)) %>%
-      group_modify(~ analyze_time_trends(.x, time_unit)) %>%
-      ungroup()
+  # Try to analyze trends with error handling
+  tryCatch({
+    # Check if test_datetime is available
+    if(!"test_datetime" %in% names(tcp_data)) {
+      # Create a helpful error message plot
+      return(ggplot() + 
+        annotate("text", x = 0.5, y = 0.5, 
+                 label = "No test_datetime column found in data. Try refreshing the data or check parsing.") +
+        theme_void())
+    }
     
-    # Create faceted plot
-    p <- facet_trends %>%
-      ggplot(aes(x = time_group, y = avg_throughput, color = !!sym(facet_by), fill = !!sym(facet_by))) +
-      geom_line(size = 1) +
-      geom_point(aes(size = test_count)) +
-      geom_ribbon(aes(ymin = avg_throughput - stability, 
+    # Check if all datetime values are NA
+    if(all(is.na(tcp_data$test_datetime))) {
+      # Try to construct datetime from individual components if available
+      if(all(c("test_date", "test_time") %in% names(tcp_data))) {
+        message("Converting test_date and test_time to test_datetime")
+        tcp_data <- tcp_data %>%
+          mutate(test_datetime = case_when(
+            !is.na(test_date) & !is.na(test_time) ~ {
+              # Parse date (assumed to be in YYYYMMDD format)
+              year <- as.integer(substr(test_date, 1, 4))
+              month <- as.integer(substr(test_date, 5, 6))
+              day <- as.integer(substr(test_date, 7, 8))
+              
+              # Parse time (assumed to be in HHMMSS format)
+              hour <- as.integer(substr(test_time, 1, 2))
+              minute <- as.integer(substr(test_time, 3, 4))
+              second <- if(nchar(test_time) >= 6) as.integer(substr(test_time, 5, 6)) else 0
+              
+              # Create datetime
+              ymd_hms(paste(year, month, day, hour, minute, second, sep="-"))
+            },
+            TRUE ~ NA_POSIXct_
+          ))
+      } else {
+        # Create a helpful error message plot
+        return(ggplot() + 
+          annotate("text", x = 0.5, y = 0.5, 
+                   label = "All test_datetime values are NA and could not reconstruct from test_date/test_time") +
+          theme_void())
+      }
+    }
+    
+    # Debug info about test_datetime
+    valid_dates <- sum(!is.na(tcp_data$test_datetime))
+    total_rows <- nrow(tcp_data)
+    message("test_datetime: ", valid_dates, "/", total_rows, " valid values (", 
+            round(valid_dates/total_rows*100, 1), "%)")
+    
+    # If we have too few valid datetime values, warn the user
+    if(valid_dates < 10) {
+      return(ggplot() + 
+        annotate("text", x = 0.5, y = 0.5, 
+                 label = paste0("Only ", valid_dates, " valid datetime values available.\n",
+                               "Need more data points for meaningful trend analysis.")) +
+        theme_void())
+    }
+    
+    # Get trends data using only rows with valid datetime
+    valid_data <- tcp_data %>% filter(!is.na(test_datetime))
+    trends_data <- analyze_time_trends(valid_data, time_unit)
+    
+    # Create base plot
+    p <- trends_data %>%
+      ggplot(aes(x = time_group, y = avg_throughput)) +
+      geom_line(size = 1, color = "steelblue") +
+      geom_point(aes(size = test_count), color = "steelblue") +
+      geom_ribbon(aes(ymin = pmax(0, avg_throughput - stability), 
                       ymax = avg_throughput + stability), 
-                  alpha = 0.1) +
+                  alpha = 0.2, fill = "steelblue") +
       labs(
         title = paste("Network Performance Trends by", str_to_title(time_unit)),
-        subtitle = paste("Faceted by", str_to_title(gsub("_", " ", facet_by))),
+        subtitle = paste0("Average throughput with standard deviation bands\n",
+                         "Using ", valid_dates, " valid datetime values"),
         x = str_to_title(time_unit),
         y = "Throughput (Mbps)",
-        size = "Tests",
-        color = str_to_title(gsub("_", " ", facet_by)),
-        fill = str_to_title(gsub("_", " ", facet_by))
+        size = "Tests"
       ) +
       theme_minimal() +
       theme(
         plot.title = element_text(face = "bold"),
         axis.title = element_text(face = "bold")
-      ) +
-      facet_wrap(vars(!!sym(facet_by)), scales = "free_y")
-  }
-  
-  return(p)
+      )
+    
+    # Add faceting if requested and the column exists
+    if(!is.null(facet_by) && facet_by %in% names(valid_data)) {
+      # We need to regenerate the trends data with the facet variable
+      facet_trends <- valid_data %>%
+        group_by(!!sym(facet_by)) %>%
+        group_modify(~ analyze_time_trends(.x, time_unit)) %>%
+        ungroup()
+      
+      # Create faceted plot
+      p <- facet_trends %>%
+        ggplot(aes(x = time_group, y = avg_throughput, color = !!sym(facet_by), fill = !!sym(facet_by))) +
+        geom_line(size = 1) +
+        geom_point(aes(size = test_count)) +
+        geom_ribbon(aes(ymin = pmax(0, avg_throughput - stability), 
+                        ymax = avg_throughput + stability), 
+                    alpha = 0.1) +
+        labs(
+          title = paste("Network Performance Trends by", str_to_title(time_unit)),
+          subtitle = paste0("Faceted by ", str_to_title(gsub("_", " ", facet_by)), "\n",
+                           "Using ", valid_dates, " valid datetime values"),
+          x = str_to_title(time_unit),
+          y = "Throughput (Mbps)",
+          size = "Tests",
+          color = str_to_title(gsub("_", " ", facet_by)),
+          fill = str_to_title(gsub("_", " ", facet_by))
+        ) +
+        theme_minimal() +
+        theme(
+          plot.title = element_text(face = "bold"),
+          axis.title = element_text(face = "bold")
+        ) +
+        facet_wrap(vars(!!sym(facet_by)), scales = "free_y")
+    }
+    
+    return(p)
+  }, error = function(e) {
+    message("Error in plot_performance_trends: ", e$message)
+    # Return a blank plot with error message
+    ggplot() + 
+      annotate("text", x = 0.5, y = 0.5, 
+               label = paste0("Could not create Performance Trends plot:\n", e$message)) +
+      theme_void()
+  })
 }
 
 #' Create a day-of-week by hour heatmap of performance
@@ -908,47 +1036,78 @@ plot_performance_trends <- function(tcp_data, time_unit = "day", facet_by = NULL
 #' @param facet_by Optional variable to facet by (e.g., "user_name")
 #' @return A ggplot object
 plot_time_pattern_heatmap <- function(tcp_data, facet_by = NULL) {
-  # Extract day of week and hour from datetime
-  heatmap_data <- tcp_data %>%
-    mutate(
-      day_of_week = wday(test_datetime, label = TRUE),
-      hour_of_day = hour(test_datetime)
-    ) %>%
-    group_by(day_of_week, hour_of_day) %>%
-    summarize(
-      avg_throughput = mean(bitrate_mbps, na.rm = TRUE),
-      test_count = n_distinct(file),
-      data_points = n(),
-      .groups = "drop"
-    )
-  
-  # Create heatmap
-  p <- heatmap_data %>%
-    ggplot(aes(x = hour_of_day, y = day_of_week, fill = avg_throughput)) +
-    geom_tile() +
-    scale_fill_viridis_c(option = "plasma", name = "Mbps") +
-    scale_x_continuous(breaks = seq(0, 23, 3),
-                     labels = c("12am", "3am", "6am", "9am", "12pm", "3pm", "6pm", "9pm")) +
-    labs(
-      title = "Performance Pattern by Day and Hour",
-      subtitle = "Average throughput (Mbps)",
-      x = "Hour of Day",
-      y = "Day of Week"
-    ) +
-    theme_minimal() +
-    theme(
-      plot.title = element_text(face = "bold"),
-      axis.title = element_text(face = "bold")
-    )
-  
-  # Add faceting if requested
-  if(!is.null(facet_by) && facet_by %in% names(tcp_data)) {
-    facet_heatmap <- tcp_data %>%
+  # Try to create the heatmap with error handling
+  tryCatch({
+    # Check if test_datetime is available
+    if(!"test_datetime" %in% names(tcp_data)) {
+      # Create a helpful error message plot
+      return(ggplot() + 
+        annotate("text", x = 0.5, y = 0.5, 
+                 label = "No test_datetime column found in data. Try refreshing the data or check parsing.") +
+        theme_void())
+    }
+    
+    # Check if all datetime values are NA
+    if(all(is.na(tcp_data$test_datetime))) {
+      # Try to construct datetime from individual components if available
+      if(all(c("test_date", "test_time") %in% names(tcp_data))) {
+        message("Converting test_date and test_time to test_datetime")
+        tcp_data <- tcp_data %>%
+          mutate(test_datetime = case_when(
+            !is.na(test_date) & !is.na(test_time) ~ {
+              # Parse date (assumed to be in YYYYMMDD format)
+              year <- as.integer(substr(test_date, 1, 4))
+              month <- as.integer(substr(test_date, 5, 6))
+              day <- as.integer(substr(test_date, 7, 8))
+              
+              # Parse time (assumed to be in HHMMSS format)
+              hour <- as.integer(substr(test_time, 1, 2))
+              minute <- as.integer(substr(test_time, 3, 4))
+              second <- if(nchar(test_time) >= 6) as.integer(substr(test_time, 5, 6)) else 0
+              
+              # Create datetime
+              ymd_hms(paste(year, month, day, hour, minute, second, sep="-"))
+            },
+            TRUE ~ NA_POSIXct_
+          ))
+      } else {
+        # Create a helpful error message plot
+        return(ggplot() + 
+          annotate("text", x = 0.5, y = 0.5, 
+                   label = "All test_datetime values are NA and could not reconstruct from test_date/test_time") +
+          theme_void())
+      }
+    }
+    
+    # Debug info about test_datetime
+    valid_dates <- sum(!is.na(tcp_data$test_datetime))
+    total_rows <- nrow(tcp_data)
+    message("test_datetime: ", valid_dates, "/", total_rows, " valid values (", 
+            round(valid_dates/total_rows*100, 1), "%)")
+    
+    # Continue only with valid datetime values
+    valid_data <- tcp_data %>% filter(!is.na(test_datetime))
+    
+    # Check if we have enough data for a meaningful heatmap
+    if(n_distinct(wday(valid_data$test_datetime)) < 2 && 
+       n_distinct(hour(valid_data$test_datetime)) < 3) {
+      return(ggplot() + 
+        annotate("text", x = 0.5, y = 0.5, 
+                 label = paste0("Not enough time diversity to create a heatmap.\n",
+                               "Need data from different days and hours.\n",
+                               "Current data spans ", 
+                               n_distinct(wday(valid_data$test_datetime)), " days and ",
+                               n_distinct(hour(valid_data$test_datetime)), " hours.")) +
+        theme_void())
+    }
+    
+    # Extract day of week and hour from datetime
+    heatmap_data <- valid_data %>%
       mutate(
         day_of_week = wday(test_datetime, label = TRUE),
         hour_of_day = hour(test_datetime)
       ) %>%
-      group_by(!!sym(facet_by), day_of_week, hour_of_day) %>%
+      group_by(day_of_week, hour_of_day) %>%
       summarize(
         avg_throughput = mean(bitrate_mbps, na.rm = TRUE),
         test_count = n_distinct(file),
@@ -956,15 +1115,17 @@ plot_time_pattern_heatmap <- function(tcp_data, facet_by = NULL) {
         .groups = "drop"
       )
     
-    p <- facet_heatmap %>%
+    # Create heatmap
+    p <- heatmap_data %>%
       ggplot(aes(x = hour_of_day, y = day_of_week, fill = avg_throughput)) +
       geom_tile() +
       scale_fill_viridis_c(option = "plasma", name = "Mbps") +
-      scale_x_continuous(breaks = seq(0, 23, 6),
-                       labels = c("12am", "6am", "12pm", "6pm")) +
+      scale_x_continuous(breaks = seq(0, 23, 3),
+                       labels = c("12am", "3am", "6am", "9am", "12pm", "3pm", "6pm", "9pm")) +
       labs(
         title = "Performance Pattern by Day and Hour",
-        subtitle = paste("Faceted by", str_to_title(gsub("_", " ", facet_by))),
+        subtitle = paste0("Average throughput (Mbps)\n",
+                         "Using ", valid_dates, " valid datetime values"),
         x = "Hour of Day",
         y = "Day of Week"
       ) +
@@ -972,9 +1133,1430 @@ plot_time_pattern_heatmap <- function(tcp_data, facet_by = NULL) {
       theme(
         plot.title = element_text(face = "bold"),
         axis.title = element_text(face = "bold")
-      ) +
-      facet_wrap(vars(!!sym(facet_by)))
+      )
+    
+    # Add faceting if requested and the column exists
+    if(!is.null(facet_by) && facet_by %in% names(valid_data)) {
+      facet_heatmap <- valid_data %>%
+        mutate(
+          day_of_week = wday(test_datetime, label = TRUE),
+          hour_of_day = hour(test_datetime)
+        ) %>%
+        group_by(!!sym(facet_by), day_of_week, hour_of_day) %>%
+        summarize(
+          avg_throughput = mean(bitrate_mbps, na.rm = TRUE),
+          test_count = n_distinct(file),
+          data_points = n(),
+          .groups = "drop"
+        )
+      
+      p <- facet_heatmap %>%
+        ggplot(aes(x = hour_of_day, y = day_of_week, fill = avg_throughput)) +
+        geom_tile() +
+        scale_fill_viridis_c(option = "plasma", name = "Mbps") +
+        scale_x_continuous(breaks = seq(0, 23, 6),
+                         labels = c("12am", "6am", "12pm", "6pm")) +
+        labs(
+          title = "Performance Pattern by Day and Hour",
+          subtitle = paste0("Faceted by ", str_to_title(gsub("_", " ", facet_by)), "\n",
+                           "Using ", valid_dates, " valid datetime values"),
+          x = "Hour of Day",
+          y = "Day of Week"
+        ) +
+        theme_minimal() +
+        theme(
+          plot.title = element_text(face = "bold"),
+          axis.title = element_text(face = "bold")
+        ) +
+        facet_wrap(vars(!!sym(facet_by)))
+    }
+    
+    return(p)
+  }, error = function(e) {
+    message("Error in plot_time_pattern_heatmap: ", e$message)
+    # Return a blank plot with error message
+    ggplot() + 
+      annotate("text", x = 0.5, y = 0.5, 
+               label = paste0("Could not create Time Pattern Heatmap:\n", e$message)) +
+      theme_void()
+  })
+}
+
+#' Add to visualize_iperf.R
+
+#' Plot time series comparison of multiple tests
+#'
+#' @param tcp_data Combined dataframe of all TCP test data 
+#' @param color_by Variable to use for coloring (default: "file")
+#' @param max_series Maximum number of series to show (default: 10)
+#' @param smooth Whether to add smoothed trend lines (default: TRUE)
+#' @return A ggplot object
+plot_time_series_comparison <- function(tcp_data, color_by = "file", max_series = 10, smooth = TRUE) {
+  # Ensure we have proper time information
+  if(!"test_datetime" %in% names(tcp_data) || all(is.na(tcp_data$test_datetime))) {
+    stop("Test datetime information is needed for time series comparison")
   }
   
-  return(p)
+  # For each file, standardize the time to start at 0
+  tcp_data <- tcp_data %>%
+    group_by(file) %>%
+    mutate(
+      relative_time = interval_start - first(interval_start),
+      actual_time = test_datetime + seconds(interval_start)
+    ) %>%
+    ungroup()
+  
+  # Get the variable to color by
+  if(!color_by %in% names(tcp_data)) {
+    warning("Color variable not found, using file name")
+    color_by <- "file"
+  }
+  
+  # Limit number of series to avoid overplotting
+  unique_values <- unique(tcp_data[[color_by]])
+  if(length(unique_values) > max_series) {
+    # If we have too many, take the most recent ones based on datetime
+    if(color_by == "file") {
+      # For files, get the most recent ones
+      newest_files <- tcp_data %>%
+        group_by(file) %>%
+        summarize(last_time = max(test_datetime), .groups = "drop") %>%
+        arrange(desc(last_time)) %>%
+        slice_head(n = max_series) %>%
+        pull(file)
+      
+      tcp_data <- tcp_data %>%
+        filter(file %in% newest_files)
+    } else {
+      # For other variables, just take the first max_series values
+      keep_values <- unique_values[1:max_series]
+      tcp_data <- tcp_data %>%
+        filter(!!sym(color_by) %in% keep_values)
+    }
+    
+    message("Limited to ", max_series, " series to avoid overplotting")
+  }
+  
+  # Plot the time series - Two options: by relative time or actual time
+  
+  # Option 1: Using relative time (aligned to start at 0)
+  p1 <- tcp_data %>%
+    ggplot(aes(x = relative_time, y = bitrate_mbps, color = !!sym(color_by), group = interaction(file, !!sym(color_by)))) +
+    geom_line(alpha = 0.7) +
+    labs(
+      title = "Network Performance Comparison Over Test Duration",
+      x = "Time from start (seconds)",
+      y = "Throughput (Mbps)",
+      color = str_to_title(gsub("_", " ", color_by))
+    ) +
+    theme_minimal()
+  
+  # Option 2: Using actual datetime
+  p2 <- tcp_data %>%
+    ggplot(aes(x = actual_time, y = bitrate_mbps, color = !!sym(color_by), group = interaction(file, !!sym(color_by)))) +
+    geom_line(alpha = 0.7) +
+    labs(
+      title = "Network Performance Over Time",
+      x = "Date/Time",
+      y = "Throughput (Mbps)",
+      color = str_to_title(gsub("_", " ", color_by))
+    ) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  # Add smoothing if requested
+  if(smooth) {
+    p1 <- p1 + geom_smooth(method = "loess", se = FALSE, span = 0.3, linewidth = 1.2)
+    p2 <- p2 + geom_smooth(method = "loess", se = FALSE, span = 0.3, linewidth = 1.2)
+  }
+  
+  # Combine the plots
+  combined <- p1 / p2 + plot_annotation(
+    title = "Network Performance Time Series Analysis",
+    subtitle = paste("Comparing", length(unique(tcp_data[[color_by]])), "different", gsub("_", " ", color_by), "values"),
+    theme = theme(plot.title = element_text(face = "bold", size = 16))
+  )
+  
+  return(combined)
+}
+
+#' Plot network performance trends over time
+#'
+#' @param tcp_data Combined dataframe of all TCP test data
+#' @param time_unit Unit for time grouping ('day', 'week', 'month', etc.)
+#' @param facet_by Optional variable to facet by (e.g., "user_name") 
+#' @return A ggplot object
+plot_performance_trends <- function(tcp_data, time_unit = "day", facet_by = NULL) {
+  # Try to analyze trends with error handling
+  tryCatch({
+    # Check if test_datetime is available
+    if(!"test_datetime" %in% names(tcp_data)) {
+      # Create a helpful error message plot
+      return(ggplot() + 
+        annotate("text", x = 0.5, y = 0.5, 
+                 label = "No test_datetime column found in data. Try refreshing the data or check parsing.") +
+        theme_void())
+    }
+    
+    # Check if all datetime values are NA
+    if(all(is.na(tcp_data$test_datetime))) {
+      # Try to construct datetime from individual components if available
+      if(all(c("test_date", "test_time") %in% names(tcp_data))) {
+        message("Converting test_date and test_time to test_datetime")
+        tcp_data <- tcp_data %>%
+          mutate(test_datetime = case_when(
+            !is.na(test_date) & !is.na(test_time) ~ {
+              # Parse date (assumed to be in YYYYMMDD format)
+              year <- as.integer(substr(test_date, 1, 4))
+              month <- as.integer(substr(test_date, 5, 6))
+              day <- as.integer(substr(test_date, 7, 8))
+              
+              # Parse time (assumed to be in HHMMSS format)
+              hour <- as.integer(substr(test_time, 1, 2))
+              minute <- as.integer(substr(test_time, 3, 4))
+              second <- if(nchar(test_time) >= 6) as.integer(substr(test_time, 5, 6)) else 0
+              
+              # Create datetime
+              ymd_hms(paste(year, month, day, hour, minute, second, sep="-"))
+            },
+            TRUE ~ NA_POSIXct_
+          ))
+      } else {
+        # Create a helpful error message plot
+        return(ggplot() + 
+          annotate("text", x = 0.5, y = 0.5, 
+                   label = "All test_datetime values are NA and could not reconstruct from test_date/test_time") +
+          theme_void())
+      }
+    }
+    
+    # Debug info about test_datetime
+    valid_dates <- sum(!is.na(tcp_data$test_datetime))
+    total_rows <- nrow(tcp_data)
+    message("test_datetime: ", valid_dates, "/", total_rows, " valid values (", 
+            round(valid_dates/total_rows*100, 1), "%)")
+    
+    # If we have too few valid datetime values, warn the user
+    if(valid_dates < 10) {
+      return(ggplot() + 
+        annotate("text", x = 0.5, y = 0.5, 
+                 label = paste0("Only ", valid_dates, " valid datetime values available.\n",
+                               "Need more data points for meaningful trend analysis.")) +
+        theme_void())
+    }
+    
+    # Get trends data using only rows with valid datetime
+    valid_data <- tcp_data %>% filter(!is.na(test_datetime))
+    trends_data <- analyze_time_trends(valid_data, time_unit)
+    
+    # Create base plot
+    p <- trends_data %>%
+      ggplot(aes(x = time_group, y = avg_throughput)) +
+      geom_line(size = 1, color = "steelblue") +
+      geom_point(aes(size = test_count), color = "steelblue") +
+      geom_ribbon(aes(ymin = pmax(0, avg_throughput - stability), 
+                      ymax = avg_throughput + stability), 
+                  alpha = 0.2, fill = "steelblue") +
+      labs(
+        title = paste("Network Performance Trends by", str_to_title(time_unit)),
+        subtitle = paste0("Average throughput with standard deviation bands\n",
+                         "Using ", valid_dates, " valid datetime values"),
+        x = str_to_title(time_unit),
+        y = "Throughput (Mbps)",
+        size = "Tests"
+      ) +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(face = "bold"),
+        axis.title = element_text(face = "bold")
+      )
+    
+    # Add faceting if requested and the column exists
+    if(!is.null(facet_by) && facet_by %in% names(valid_data)) {
+      # We need to regenerate the trends data with the facet variable
+      facet_trends <- valid_data %>%
+        group_by(!!sym(facet_by)) %>%
+        group_modify(~ analyze_time_trends(.x, time_unit)) %>%
+        ungroup()
+      
+      # Create faceted plot
+      p <- facet_trends %>%
+        ggplot(aes(x = time_group, y = avg_throughput, color = !!sym(facet_by), fill = !!sym(facet_by))) +
+        geom_line(size = 1) +
+        geom_point(aes(size = test_count)) +
+        geom_ribbon(aes(ymin = pmax(0, avg_throughput - stability), 
+                        ymax = avg_throughput + stability), 
+                    alpha = 0.1) +
+        labs(
+          title = paste("Network Performance Trends by", str_to_title(time_unit)),
+          subtitle = paste0("Faceted by ", str_to_title(gsub("_", " ", facet_by)), "\n",
+                           "Using ", valid_dates, " valid datetime values"),
+          x = str_to_title(time_unit),
+          y = "Throughput (Mbps)",
+          size = "Tests",
+          color = str_to_title(gsub("_", " ", facet_by)),
+          fill = str_to_title(gsub("_", " ", facet_by))
+        ) +
+        theme_minimal() +
+        theme(
+          plot.title = element_text(face = "bold"),
+          axis.title = element_text(face = "bold")
+        ) +
+        facet_wrap(vars(!!sym(facet_by)), scales = "free_y")
+    }
+    
+    return(p)
+  }, error = function(e) {
+    message("Error in plot_performance_trends: ", e$message)
+    # Return a blank plot with error message
+    ggplot() + 
+      annotate("text", x = 0.5, y = 0.5, 
+               label = paste0("Could not create Performance Trends plot:\n", e$message)) +
+      theme_void()
+  })
+}
+
+#' Create a day-of-week by hour heatmap of performance
+#'
+#' @param tcp_data Combined dataframe of all TCP test data
+#' @param facet_by Optional variable to facet by (e.g., "user_name")
+#' @return A ggplot object
+plot_time_pattern_heatmap <- function(tcp_data, facet_by = NULL) {
+  # Try to create the heatmap with error handling
+  tryCatch({
+    # Check if test_datetime is available
+    if(!"test_datetime" %in% names(tcp_data)) {
+      # Create a helpful error message plot
+      return(ggplot() + 
+        annotate("text", x = 0.5, y = 0.5, 
+                 label = "No test_datetime column found in data. Try refreshing the data or check parsing.") +
+        theme_void())
+    }
+    
+    # Check if all datetime values are NA
+    if(all(is.na(tcp_data$test_datetime))) {
+      # Try to construct datetime from individual components if available
+      if(all(c("test_date", "test_time") %in% names(tcp_data))) {
+        message("Converting test_date and test_time to test_datetime")
+        tcp_data <- tcp_data %>%
+          mutate(test_datetime = case_when(
+            !is.na(test_date) & !is.na(test_time) ~ {
+              # Parse date (assumed to be in YYYYMMDD format)
+              year <- as.integer(substr(test_date, 1, 4))
+              month <- as.integer(substr(test_date, 5, 6))
+              day <- as.integer(substr(test_date, 7, 8))
+              
+              # Parse time (assumed to be in HHMMSS format)
+              hour <- as.integer(substr(test_time, 1, 2))
+              minute <- as.integer(substr(test_time, 3, 4))
+              second <- if(nchar(test_time) >= 6) as.integer(substr(test_time, 5, 6)) else 0
+              
+              # Create datetime
+              ymd_hms(paste(year, month, day, hour, minute, second, sep="-"))
+            },
+            TRUE ~ NA_POSIXct_
+          ))
+      } else {
+        # Create a helpful error message plot
+        return(ggplot() + 
+          annotate("text", x = 0.5, y = 0.5, 
+                   label = "All test_datetime values are NA and could not reconstruct from test_date/test_time") +
+          theme_void())
+      }
+    }
+    
+    # Debug info about test_datetime
+    valid_dates <- sum(!is.na(tcp_data$test_datetime))
+    total_rows <- nrow(tcp_data)
+    message("test_datetime: ", valid_dates, "/", total_rows, " valid values (", 
+            round(valid_dates/total_rows*100, 1), "%)")
+    
+    # Continue only with valid datetime values
+    valid_data <- tcp_data %>% filter(!is.na(test_datetime))
+    
+    # Check if we have enough data for a meaningful heatmap
+    if(n_distinct(wday(valid_data$test_datetime)) < 2 && 
+       n_distinct(hour(valid_data$test_datetime)) < 3) {
+      return(ggplot() + 
+        annotate("text", x = 0.5, y = 0.5, 
+                 label = paste0("Not enough time diversity to create a heatmap.\n",
+                               "Need data from different days and hours.\n",
+                               "Current data spans ", 
+                               n_distinct(wday(valid_data$test_datetime)), " days and ",
+                               n_distinct(hour(valid_data$test_datetime)), " hours.")) +
+        theme_void())
+    }
+    
+    # Extract day of week and hour from datetime
+    heatmap_data <- valid_data %>%
+      mutate(
+        day_of_week = wday(test_datetime, label = TRUE),
+        hour_of_day = hour(test_datetime)
+      ) %>%
+      group_by(day_of_week, hour_of_day) %>%
+      summarize(
+        avg_throughput = mean(bitrate_mbps, na.rm = TRUE),
+        test_count = n_distinct(file),
+        data_points = n(),
+        .groups = "drop"
+      )
+    
+    # Create heatmap
+    p <- heatmap_data %>%
+      ggplot(aes(x = hour_of_day, y = day_of_week, fill = avg_throughput)) +
+      geom_tile() +
+      scale_fill_viridis_c(option = "plasma", name = "Mbps") +
+      scale_x_continuous(breaks = seq(0, 23, 3),
+                       labels = c("12am", "3am", "6am", "9am", "12pm", "3pm", "6pm", "9pm")) +
+      labs(
+        title = "Performance Pattern by Day and Hour",
+        subtitle = paste0("Average throughput (Mbps)\n",
+                         "Using ", valid_dates, " valid datetime values"),
+        x = "Hour of Day",
+        y = "Day of Week"
+      ) +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(face = "bold"),
+        axis.title = element_text(face = "bold")
+      )
+    
+    # Add faceting if requested and the column exists
+    if(!is.null(facet_by) && facet_by %in% names(valid_data)) {
+      facet_heatmap <- valid_data %>%
+        mutate(
+          day_of_week = wday(test_datetime, label = TRUE),
+          hour_of_day = hour(test_datetime)
+        ) %>%
+        group_by(!!sym(facet_by), day_of_week, hour_of_day) %>%
+        summarize(
+          avg_throughput = mean(bitrate_mbps, na.rm = TRUE),
+          test_count = n_distinct(file),
+          data_points = n(),
+          .groups = "drop"
+        )
+      
+      p <- facet_heatmap %>%
+        ggplot(aes(x = hour_of_day, y = day_of_week, fill = avg_throughput)) +
+        geom_tile() +
+        scale_fill_viridis_c(option = "plasma", name = "Mbps") +
+        scale_x_continuous(breaks = seq(0, 23, 6),
+                         labels = c("12am", "6am", "12pm", "6pm")) +
+        labs(
+          title = "Performance Pattern by Day and Hour",
+          subtitle = paste0("Faceted by ", str_to_title(gsub("_", " ", facet_by)), "\n",
+                           "Using ", valid_dates, " valid datetime values"),
+          x = "Hour of Day",
+          y = "Day of Week"
+        ) +
+        theme_minimal() +
+        theme(
+          plot.title = element_text(face = "bold"),
+          axis.title = element_text(face = "bold")
+        ) +
+        facet_wrap(vars(!!sym(facet_by)))
+    }
+    
+    return(p)
+  }, error = function(e) {
+    message("Error in plot_time_pattern_heatmap: ", e$message)
+    # Return a blank plot with error message
+    ggplot() + 
+      annotate("text", x = 0.5, y = 0.5, 
+               label = paste0("Could not create Time Pattern Heatmap:\n", e$message)) +
+      theme_void()
+  })
+}
+
+#' Add to visualize_iperf.R
+
+#' Plot time series comparison of multiple tests
+#'
+#' @param tcp_data Combined dataframe of all TCP test data 
+#' @param color_by Variable to use for coloring (default: "file")
+#' @param max_series Maximum number of series to show (default: 10)
+#' @param smooth Whether to add smoothed trend lines (default: TRUE)
+#' @return A ggplot object
+plot_time_series_comparison <- function(tcp_data, color_by = "file", max_series = 10, smooth = TRUE) {
+  # Ensure we have proper time information
+  if(!"test_datetime" %in% names(tcp_data) || all(is.na(tcp_data$test_datetime))) {
+    stop("Test datetime information is needed for time series comparison")
+  }
+  
+  # For each file, standardize the time to start at 0
+  tcp_data <- tcp_data %>%
+    group_by(file) %>%
+    mutate(
+      relative_time = interval_start - first(interval_start),
+      actual_time = test_datetime + seconds(interval_start)
+    ) %>%
+    ungroup()
+  
+  # Get the variable to color by
+  if(!color_by %in% names(tcp_data)) {
+    warning("Color variable not found, using file name")
+    color_by <- "file"
+  }
+  
+  # Limit number of series to avoid overplotting
+  unique_values <- unique(tcp_data[[color_by]])
+  if(length(unique_values) > max_series) {
+    # If we have too many, take the most recent ones based on datetime
+    if(color_by == "file") {
+      # For files, get the most recent ones
+      newest_files <- tcp_data %>%
+        group_by(file) %>%
+        summarize(last_time = max(test_datetime), .groups = "drop") %>%
+        arrange(desc(last_time)) %>%
+        slice_head(n = max_series) %>%
+        pull(file)
+      
+      tcp_data <- tcp_data %>%
+        filter(file %in% newest_files)
+    } else {
+      # For other variables, just take the first max_series values
+      keep_values <- unique_values[1:max_series]
+      tcp_data <- tcp_data %>%
+        filter(!!sym(color_by) %in% keep_values)
+    }
+    
+    message("Limited to ", max_series, " series to avoid overplotting")
+  }
+  
+  # Plot the time series - Two options: by relative time or actual time
+  
+  # Option 1: Using relative time (aligned to start at 0)
+  p1 <- tcp_data %>%
+    ggplot(aes(x = relative_time, y = bitrate_mbps, color = !!sym(color_by), group = interaction(file, !!sym(color_by)))) +
+    geom_line(alpha = 0.7) +
+    labs(
+      title = "Network Performance Comparison Over Test Duration",
+      x = "Time from start (seconds)",
+      y = "Throughput (Mbps)",
+      color = str_to_title(gsub("_", " ", color_by))
+    ) +
+    theme_minimal()
+  
+  # Option 2: Using actual datetime
+  p2 <- tcp_data %>%
+    ggplot(aes(x = actual_time, y = bitrate_mbps, color = !!sym(color_by), group = interaction(file, !!sym(color_by)))) +
+    geom_line(alpha = 0.7) +
+    labs(
+      title = "Network Performance Over Time",
+      x = "Date/Time",
+      y = "Throughput (Mbps)",
+      color = str_to_title(gsub("_", " ", color_by))
+    ) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  # Add smoothing if requested
+  if(smooth) {
+    p1 <- p1 + geom_smooth(method = "loess", se = FALSE, span = 0.3, linewidth = 1.2)
+    p2 <- p2 + geom_smooth(method = "loess", se = FALSE, span = 0.3, linewidth = 1.2)
+  }
+  
+  # Combine the plots
+  combined <- p1 / p2 + plot_annotation(
+    title = "Network Performance Time Series Analysis",
+    subtitle = paste("Comparing", length(unique(tcp_data[[color_by]])), "different", gsub("_", " ", color_by), "values"),
+    theme = theme(plot.title = element_text(face = "bold", size = 16))
+  )
+  
+  return(combined)
+}
+
+#' Plot network performance trends over time
+#'
+#' @param tcp_data Combined dataframe of all TCP test data
+#' @param time_unit Unit for time grouping ('day', 'week', 'month', etc.)
+#' @param facet_by Optional variable to facet by (e.g., "user_name") 
+#' @return A ggplot object
+plot_performance_trends <- function(tcp_data, time_unit = "day", facet_by = NULL) {
+  # Try to analyze trends with error handling
+  tryCatch({
+    # Check if test_datetime is available
+    if(!"test_datetime" %in% names(tcp_data)) {
+      # Create a helpful error message plot
+      return(ggplot() + 
+        annotate("text", x = 0.5, y = 0.5, 
+                 label = "No test_datetime column found in data. Try refreshing the data or check parsing.") +
+        theme_void())
+    }
+    
+    # Check if all datetime values are NA
+    if(all(is.na(tcp_data$test_datetime))) {
+      # Try to construct datetime from individual components if available
+      if(all(c("test_date", "test_time") %in% names(tcp_data))) {
+        message("Converting test_date and test_time to test_datetime")
+        tcp_data <- tcp_data %>%
+          mutate(test_datetime = case_when(
+            !is.na(test_date) & !is.na(test_time) ~ {
+              # Parse date (assumed to be in YYYYMMDD format)
+              year <- as.integer(substr(test_date, 1, 4))
+              month <- as.integer(substr(test_date, 5, 6))
+              day <- as.integer(substr(test_date, 7, 8))
+              
+              # Parse time (assumed to be in HHMMSS format)
+              hour <- as.integer(substr(test_time, 1, 2))
+              minute <- as.integer(substr(test_time, 3, 4))
+              second <- if(nchar(test_time) >= 6) as.integer(substr(test_time, 5, 6)) else 0
+              
+              # Create datetime
+              ymd_hms(paste(year, month, day, hour, minute, second, sep="-"))
+            },
+            TRUE ~ NA_POSIXct_
+          ))
+      } else {
+        # Create a helpful error message plot
+        return(ggplot() + 
+          annotate("text", x = 0.5, y = 0.5, 
+                   label = "All test_datetime values are NA and could not reconstruct from test_date/test_time") +
+          theme_void())
+      }
+    }
+    
+    # Debug info about test_datetime
+    valid_dates <- sum(!is.na(tcp_data$test_datetime))
+    total_rows <- nrow(tcp_data)
+    message("test_datetime: ", valid_dates, "/", total_rows, " valid values (", 
+            round(valid_dates/total_rows*100, 1), "%)")
+    
+    # If we have too few valid datetime values, warn the user
+    if(valid_dates < 10) {
+      return(ggplot() + 
+        annotate("text", x = 0.5, y = 0.5, 
+                 label = paste0("Only ", valid_dates, " valid datetime values available.\n",
+                               "Need more data points for meaningful trend analysis.")) +
+        theme_void())
+    }
+    
+    # Get trends data using only rows with valid datetime
+    valid_data <- tcp_data %>% filter(!is.na(test_datetime))
+    trends_data <- analyze_time_trends(valid_data, time_unit)
+    
+    # Create base plot
+    p <- trends_data %>%
+      ggplot(aes(x = time_group, y = avg_throughput)) +
+      geom_line(size = 1, color = "steelblue") +
+      geom_point(aes(size = test_count), color = "steelblue") +
+      geom_ribbon(aes(ymin = pmax(0, avg_throughput - stability), 
+                      ymax = avg_throughput + stability), 
+                  alpha = 0.2, fill = "steelblue") +
+      labs(
+        title = paste("Network Performance Trends by", str_to_title(time_unit)),
+        subtitle = paste0("Average throughput with standard deviation bands\n",
+                         "Using ", valid_dates, " valid datetime values"),
+        x = str_to_title(time_unit),
+        y = "Throughput (Mbps)",
+        size = "Tests"
+      ) +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(face = "bold"),
+        axis.title = element_text(face = "bold")
+      )
+    
+    # Add faceting if requested and the column exists
+    if(!is.null(facet_by) && facet_by %in% names(valid_data)) {
+      # We need to regenerate the trends data with the facet variable
+      facet_trends <- valid_data %>%
+        group_by(!!sym(facet_by)) %>%
+        group_modify(~ analyze_time_trends(.x, time_unit)) %>%
+        ungroup()
+      
+      # Create faceted plot
+      p <- facet_trends %>%
+        ggplot(aes(x = time_group, y = avg_throughput, color = !!sym(facet_by), fill = !!sym(facet_by))) +
+        geom_line(size = 1) +
+        geom_point(aes(size = test_count)) +
+        geom_ribbon(aes(ymin = pmax(0, avg_throughput - stability), 
+                        ymax = avg_throughput + stability), 
+                    alpha = 0.1) +
+        labs(
+          title = paste("Network Performance Trends by", str_to_title(time_unit)),
+          subtitle = paste0("Faceted by ", str_to_title(gsub("_", " ", facet_by)), "\n",
+                           "Using ", valid_dates, " valid datetime values"),
+          x = str_to_title(time_unit),
+          y = "Throughput (Mbps)",
+          size = "Tests",
+          color = str_to_title(gsub("_", " ", facet_by)),
+          fill = str_to_title(gsub("_", " ", facet_by))
+        ) +
+        theme_minimal() +
+        theme(
+          plot.title = element_text(face = "bold"),
+          axis.title = element_text(face = "bold")
+        ) +
+        facet_wrap(vars(!!sym(facet_by)), scales = "free_y")
+    }
+    
+    return(p)
+  }, error = function(e) {
+    message("Error in plot_performance_trends: ", e$message)
+    # Return a blank plot with error message
+    ggplot() + 
+      annotate("text", x = 0.5, y = 0.5, 
+               label = paste0("Could not create Performance Trends plot:\n", e$message)) +
+      theme_void()
+  })
+}
+
+#' Create a day-of-week by hour heatmap of performance
+#'
+#' @param tcp_data Combined dataframe of all TCP test data
+#' @param facet_by Optional variable to facet by (e.g., "user_name")
+#' @return A ggplot object
+plot_time_pattern_heatmap <- function(tcp_data, facet_by = NULL) {
+  # Try to create the heatmap with error handling
+  tryCatch({
+    # Check if test_datetime is available
+    if(!"test_datetime" %in% names(tcp_data)) {
+      # Create a helpful error message plot
+      return(ggplot() + 
+        annotate("text", x = 0.5, y = 0.5, 
+                 label = "No test_datetime column found in data. Try refreshing the data or check parsing.") +
+        theme_void())
+    }
+    
+    # Check if all datetime values are NA
+    if(all(is.na(tcp_data$test_datetime))) {
+      # Try to construct datetime from individual components if available
+      if(all(c("test_date", "test_time") %in% names(tcp_data))) {
+        message("Converting test_date and test_time to test_datetime")
+        tcp_data <- tcp_data %>%
+          mutate(test_datetime = case_when(
+            !is.na(test_date) & !is.na(test_time) ~ {
+              # Parse date (assumed to be in YYYYMMDD format)
+              year <- as.integer(substr(test_date, 1, 4))
+              month <- as.integer(substr(test_date, 5, 6))
+              day <- as.integer(substr(test_date, 7, 8))
+              
+              # Parse time (assumed to be in HHMMSS format)
+              hour <- as.integer(substr(test_time, 1, 2))
+              minute <- as.integer(substr(test_time, 3, 4))
+              second <- if(nchar(test_time) >= 6) as.integer(substr(test_time, 5, 6)) else 0
+              
+              # Create datetime
+              ymd_hms(paste(year, month, day, hour, minute, second, sep="-"))
+            },
+            TRUE ~ NA_POSIXct_
+          ))
+      } else {
+        # Create a helpful error message plot
+        return(ggplot() + 
+          annotate("text", x = 0.5, y = 0.5, 
+                   label = "All test_datetime values are NA and could not reconstruct from test_date/test_time") +
+          theme_void())
+      }
+    }
+    
+    # Debug info about test_datetime
+    valid_dates <- sum(!is.na(tcp_data$test_datetime))
+    total_rows <- nrow(tcp_data)
+    message("test_datetime: ", valid_dates, "/", total_rows, " valid values (", 
+            round(valid_dates/total_rows*100, 1), "%)")
+    
+    # Continue only with valid datetime values
+    valid_data <- tcp_data %>% filter(!is.na(test_datetime))
+    
+    # Check if we have enough data for a meaningful heatmap
+    if(n_distinct(wday(valid_data$test_datetime)) < 2 && 
+       n_distinct(hour(valid_data$test_datetime)) < 3) {
+      return(ggplot() + 
+        annotate("text", x = 0.5, y = 0.5, 
+                 label = paste0("Not enough time diversity to create a heatmap.\n",
+                               "Need data from different days and hours.\n",
+                               "Current data spans ", 
+                               n_distinct(wday(valid_data$test_datetime)), " days and ",
+                               n_distinct(hour(valid_data$test_datetime)), " hours.")) +
+        theme_void())
+    }
+    
+    # Extract day of week and hour from datetime
+    heatmap_data <- valid_data %>%
+      mutate(
+        day_of_week = wday(test_datetime, label = TRUE),
+        hour_of_day = hour(test_datetime)
+      ) %>%
+      group_by(day_of_week, hour_of_day) %>%
+      summarize(
+        avg_throughput = mean(bitrate_mbps, na.rm = TRUE),
+        test_count = n_distinct(file),
+        data_points = n(),
+        .groups = "drop"
+      )
+    
+    # Create heatmap
+    p <- heatmap_data %>%
+      ggplot(aes(x = hour_of_day, y = day_of_week, fill = avg_throughput)) +
+      geom_tile() +
+      scale_fill_viridis_c(option = "plasma", name = "Mbps") +
+      scale_x_continuous(breaks = seq(0, 23, 3),
+                       labels = c("12am", "3am", "6am", "9am", "12pm", "3pm", "6pm", "9pm")) +
+      labs(
+        title = "Performance Pattern by Day and Hour",
+        subtitle = paste0("Average throughput (Mbps)\n",
+                         "Using ", valid_dates, " valid datetime values"),
+        x = "Hour of Day",
+        y = "Day of Week"
+      ) +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(face = "bold"),
+        axis.title = element_text(face = "bold")
+      )
+    
+    # Add faceting if requested and the column exists
+    if(!is.null(facet_by) && facet_by %in% names(valid_data)) {
+      facet_heatmap <- valid_data %>%
+        mutate(
+          day_of_week = wday(test_datetime, label = TRUE),
+          hour_of_day = hour(test_datetime)
+        ) %>%
+        group_by(!!sym(facet_by), day_of_week, hour_of_day) %>%
+        summarize(
+          avg_throughput = mean(bitrate_mbps, na.rm = TRUE),
+          test_count = n_distinct(file),
+          data_points = n(),
+          .groups = "drop"
+        )
+      
+      p <- facet_heatmap %>%
+        ggplot(aes(x = hour_of_day, y = day_of_week, fill = avg_throughput)) +
+        geom_tile() +
+        scale_fill_viridis_c(option = "plasma", name = "Mbps") +
+        scale_x_continuous(breaks = seq(0, 23, 6),
+                         labels = c("12am", "6am", "12pm", "6pm")) +
+        labs(
+          title = "Performance Pattern by Day and Hour",
+          subtitle = paste0("Faceted by ", str_to_title(gsub("_", " ", facet_by)), "\n",
+                           "Using ", valid_dates, " valid datetime values"),
+          x = "Hour of Day",
+          y = "Day of Week"
+        ) +
+        theme_minimal() +
+        theme(
+          plot.title = element_text(face = "bold"),
+          axis.title = element_text(face = "bold")
+        ) +
+        facet_wrap(vars(!!sym(facet_by)))
+    }
+    
+    return(p)
+  }, error = function(e) {
+    message("Error in plot_time_pattern_heatmap: ", e$message)
+    # Return a blank plot with error message
+    ggplot() + 
+      annotate("text", x = 0.5, y = 0.5, 
+               label = paste0("Could not create Time Pattern Heatmap:\n", e$message)) +
+      theme_void()
+  })
+}
+
+#' Group data by date for analysis
+#'
+#' @param tcp_data Combined dataframe of all TCP test data
+#' @return A dataframe grouped by date
+group_by_date <- function(tcp_data) {
+  # Check if we have test_datetime
+  if(!"test_datetime" %in% names(tcp_data)) {
+    stop("test_datetime column required for date grouping")
+  }
+  
+  # Create date-only field for grouping
+  tcp_data <- tcp_data %>%
+    mutate(date_only = as.Date(test_datetime))
+  
+  # Group by date and calculate statistics
+  daily_data <- tcp_data %>%
+    group_by(test_date = date_only) %>%
+    summarize(
+      avg_throughput = mean(bitrate_mbps, na.rm = TRUE),
+      median_throughput = median(bitrate_mbps, na.rm = TRUE),
+      min_throughput = min(bitrate_mbps, na.rm = TRUE),
+      max_throughput = max(bitrate_mbps, na.rm = TRUE),
+      std_dev = sd(bitrate_mbps, na.rm = TRUE),
+      test_count = n_distinct(file),
+      data_points = n(),
+      .groups = "drop"
+    ) %>%
+    arrange(test_date)
+  
+  return(daily_data)
+}
+
+#' Group data by time of day
+#'
+#' @param tcp_data Combined dataframe of all TCP test data
+#' @return A dataframe grouped by time periods
+group_by_time_of_day <- function(tcp_data) {
+  # Check if we have test_datetime
+  if(!"test_datetime" %in% names(tcp_data)) {
+    stop("test_datetime column required for time of day analysis")
+  }
+  
+  # Extract hour and create time period
+  tcp_data <- tcp_data %>%
+    mutate(
+      hour = hour(test_datetime),
+      time_period = case_when(
+        hour >= 6 & hour < 12 ~ "Morning (6AM-12PM)",
+        hour >= 12 & hour < 18 ~ "Afternoon (12PM-6PM)",
+        hour >= 18 & hour < 24 ~ "Evening (6PM-12AM)",
+        TRUE ~ "Night (12AM-6AM)"
+      )
+    )
+  
+  # Group by time period
+  tod_summary <- tcp_data %>%
+    group_by(time_period) %>%
+    summarize(
+      avg_throughput = mean(bitrate_mbps, na.rm = TRUE),
+      median_throughput = median(bitrate_mbps, na.rm = TRUE),
+      min_throughput = min(bitrate_mbps, na.rm = TRUE),
+      max_throughput = max(bitrate_mbps, na.rm = TRUE),
+      stability = sd(bitrate_mbps, na.rm = TRUE),
+      test_count = n_distinct(file),
+      data_points = n(),
+      .groups = "drop"
+    ) %>%
+    # Sort by time of day
+    mutate(time_period = factor(time_period, 
+                               levels = c("Morning (6AM-12PM)", 
+                                          "Afternoon (12PM-6PM)",
+                                          "Evening (6PM-12AM)", 
+                                          "Night (12AM-6AM)"))) %>%
+    arrange(time_period)
+  
+  return(tod_summary)
+}
+
+#' Analyze trends in performance over time
+#'
+#' @param tcp_data Combined dataframe of all TCP test data
+#' @param time_unit Unit for time grouping ('day', 'week', 'month', etc.)
+#' @return A dataframe with time trends analysis
+analyze_time_trends <- function(tcp_data, time_unit = "day") {
+  # Check if we have test_datetime
+  if(!"test_datetime" %in% names(tcp_data) || all(is.na(tcp_data$test_datetime))) {
+    stop("Valid test_datetime information is required for time trend analysis")
+  }
+  
+  # Format time based on the requested unit
+  tcp_data <- tcp_data %>%
+    mutate(
+      time_group = case_when(
+        time_unit == "hour" ~ floor_date(test_datetime, "hour"),
+        time_unit == "day" ~ as.Date(test_datetime),
+        time_unit == "week" ~ floor_date(test_datetime, "week"),
+        time_unit == "month" ~ floor_date(test_datetime, "month"),
+        TRUE ~ as.Date(test_datetime)  # Default to day
+      )
+    )
+  
+  # Group and analyze by time period
+  time_trends <- tcp_data %>%
+    group_by(time_group) %>%
+    summarize(
+      test_count = n_distinct(file),
+      user_count = if("user_name" %in% names(tcp_data)) n_distinct(user_name) else 1,
+      avg_throughput = mean(bitrate_mbps, na.rm = TRUE),
+      median_throughput = median(bitrate_mbps, na.rm = TRUE),
+      stability = sd(bitrate_mbps, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    arrange(time_group)
+  
+  # Calculate trend indicators if we have multiple data points
+  if(nrow(time_trends) > 1) {
+    time_trends <- time_trends %>%
+      mutate(
+        throughput_change = c(NA, diff(avg_throughput)),
+        throughput_change_pct = ifelse(is.na(lag(avg_throughput)) | lag(avg_throughput) == 0, 
+                                     NA, 
+                                     throughput_change / lag(avg_throughput) * 100),
+        trend = case_when(
+          is.na(throughput_change) ~ "initial",
+          throughput_change > 0 ~ "improving",
+          throughput_change < 0 ~ "degrading",
+          TRUE ~ "stable"
+        )
+      )
+  }
+  
+  return(time_trends)
+}
+
+#' Modified plot_time_of_day with better error handling
+#'
+#' @param tcp_data Combined dataframe of all TCP test data
+#' @return A ggplot object
+plot_time_of_day <- function(tcp_data) {
+  # Try to create time of day data, with error handling
+  tryCatch({
+    tod_data <- group_by_time_of_day(tcp_data)
+    
+    ggplot(tod_data, aes(x = time_period, y = avg_throughput)) +
+      geom_col(fill = "steelblue", alpha = 0.8) +
+      geom_errorbar(aes(ymin = pmax(0, avg_throughput - stability), 
+                        ymax = avg_throughput + stability),
+                  width = 0.2) +
+      labs(
+        title = "Network Performance by Time of Day",
+        subtitle = "Average throughput with standard deviation",
+        x = "Time of Day",
+        y = "Throughput (Mbps)",
+        caption = paste0("Based on ", length(unique(tcp_data$file)), " tests")
+      ) +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(face = "bold"),
+        axis.title = element_text(face = "bold"),
+        axis.text.x = element_text(angle = 45, hjust = 1)
+      )
+  }, error = function(e) {
+    message("Error in plot_time_of_day: ", e$message)
+    # Return a blank plot with error message
+    ggplot() + 
+      annotate("text", x = 0.5, y = 0.5, 
+               label = paste("Could not create Time of Day plot:", e$message)) +
+      theme_void()
+  })
+}
+
+#' Modified plot_performance_trends with better error handling
+#'
+#' @param tcp_data Combined dataframe of all TCP test data
+#' @param time_unit Unit for time grouping ('day', 'week', 'month', etc.)
+#' @param facet_by Optional variable to facet by (e.g., "user_name") 
+#' @return A ggplot object
+plot_performance_trends <- function(tcp_data, time_unit = "day", facet_by = NULL) {
+  # Try to analyze trends with error handling
+  tryCatch({
+    # Get trends data
+    trends_data <- analyze_time_trends(tcp_data, time_unit)
+    
+    # Create base plot
+    p <- trends_data %>%
+      ggplot(aes(x = time_group, y = avg_throughput)) +
+      geom_line(size = 1, color = "steelblue") +
+      geom_point(aes(size = test_count), color = "steelblue") +
+      geom_ribbon(aes(ymin = pmax(0, avg_throughput - stability), 
+                      ymax = avg_throughput + stability), 
+                  alpha = 0.2, fill = "steelblue") +
+      labs(
+        title = paste("Network Performance Trends by", str_to_title(time_unit)),
+        subtitle = "Average throughput with standard deviation bands",
+        x = str_to_title(time_unit),
+        y = "Throughput (Mbps)",
+        size = "Tests"
+      ) +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(face = "bold"),
+        axis.title = element_text(face = "bold")
+      )
+    
+    # Add faceting if requested and the column exists
+    if(!is.null(facet_by) && facet_by %in% names(tcp_data)) {
+      # We need to regenerate the trends data with the facet variable
+      facet_trends <- tcp_data %>%
+        group_by(!!sym(facet_by)) %>%
+        group_modify(~ analyze_time_trends(.x, time_unit)) %>%
+        ungroup()
+      
+      # Create faceted plot
+      p <- facet_trends %>%
+        ggplot(aes(x = time_group, y = avg_throughput, color = !!sym(facet_by), fill = !!sym(facet_by))) +
+        geom_line(size = 1) +
+        geom_point(aes(size = test_count)) +
+        geom_ribbon(aes(ymin = pmax(0, avg_throughput - stability), 
+                        ymax = avg_throughput + stability), 
+                    alpha = 0.1) +
+        labs(
+          title = paste("Network Performance Trends by", str_to_title(time_unit)),
+          subtitle = paste("Faceted by", str_to_title(gsub("_", " ", facet_by))),
+          x = str_to_title(time_unit),
+          y = "Throughput (Mbps)",
+          size = "Tests",
+          color = str_to_title(gsub("_", " ", facet_by)),
+          fill = str_to_title(gsub("_", " ", facet_by))
+        ) +
+        theme_minimal() +
+        theme(
+          plot.title = element_text(face = "bold"),
+          axis.title = element_text(face = "bold")
+        ) +
+        facet_wrap(vars(!!sym(facet_by)), scales = "free_y")
+    }
+    
+    return(p)
+  }, error = function(e) {
+    message("Error in plot_performance_trends: ", e$message)
+    # Return a blank plot with error message
+    ggplot() + 
+      annotate("text", x = 0.5, y = 0.5, 
+               label = paste("Could not create Performance Trends plot:", e$message)) +
+      theme_void()
+  })
+}
+
+#' Modified plot_time_pattern_heatmap with better error handling
+#'
+#' @param tcp_data Combined dataframe of all TCP test data
+#' @param facet_by Optional variable to facet by (e.g., "user_name")
+#' @return A ggplot object
+plot_time_pattern_heatmap <- function(tcp_data, facet_by = NULL) {
+  # Try to create the heatmap with error handling
+  tryCatch({
+    # Check if we have datetime information
+    if(!"test_datetime" %in% names(tcp_data) || all(is.na(tcp_data$test_datetime))) {
+      stop("Valid test_datetime information is required for time pattern heatmap")
+    }
+    
+    # Extract day of week and hour from datetime
+    heatmap_data <- tcp_data %>%
+      mutate(
+        day_of_week = wday(test_datetime, label = TRUE),
+        hour_of_day = hour(test_datetime)
+      ) %>%
+      group_by(day_of_week, hour_of_day) %>%
+      summarize(
+        avg_throughput = mean(bitrate_mbps, na.rm = TRUE),
+        test_count = n_distinct(file),
+        data_points = n(),
+        .groups = "drop"
+      )
+    
+    # Create heatmap
+    p <- heatmap_data %>%
+      ggplot(aes(x = hour_of_day, y = day_of_week, fill = avg_throughput)) +
+      geom_tile() +
+      scale_fill_viridis_c(option = "plasma", name = "Mbps") +
+      scale_x_continuous(breaks = seq(0, 23, 3),
+                       labels = c("12am", "3am", "6am", "9am", "12pm", "3pm", "6pm", "9pm")) +
+      labs(
+        title = "Performance Pattern by Day and Hour",
+        subtitle = "Average throughput (Mbps)",
+        x = "Hour of Day",
+        y = "Day of Week"
+      ) +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(face = "bold"),
+        axis.title = element_text(face = "bold")
+      )
+    
+    # Add faceting if requested
+    if(!is.null(facet_by) && facet_by %in% names(tcp_data)) {
+      facet_heatmap <- tcp_data %>%
+        mutate(
+          day_of_week = wday(test_datetime, label = TRUE),
+          hour_of_day = hour(test_datetime)
+        ) %>%
+        group_by(!!sym(facet_by), day_of_week, hour_of_day) %>%
+        summarize(
+          avg_throughput = mean(bitrate_mbps, na.rm = TRUE),
+          test_count = n_distinct(file),
+          data_points = n(),
+          .groups = "drop"
+        )
+      
+      p <- facet_heatmap %>%
+        ggplot(aes(x = hour_of_day, y = day_of_week, fill = avg_throughput)) +
+        geom_tile() +
+        scale_fill_viridis_c(option = "plasma", name = "Mbps") +
+        scale_x_continuous(breaks = seq(0, 23, 6),
+                         labels = c("12am", "6am", "12pm", "6pm")) +
+        labs(
+          title = "Performance Pattern by Day and Hour",
+          subtitle = paste("Faceted by", str_to_title(gsub("_", " ", facet_by))),
+          x = "Hour of Day",
+          y = "Day of Week"
+        ) +
+        theme_minimal() +
+        theme(
+          plot.title = element_text(face = "bold"),
+          axis.title = element_text(face = "bold")
+        ) +
+        facet_wrap(vars(!!sym(facet_by)))
+    }
+    
+    return(p)
+  }, error = function(e) {
+    message("Error in plot_time_pattern_heatmap: ", e$message)
+    # Return a blank plot with error message
+    ggplot() + 
+      annotate("text", x = 0.5, y = 0.5, 
+               label = paste("Could not create Time Pattern Heatmap:", e$message)) +
+      theme_void()
+  })
+}
+
+#' Add to visualize_iperf.R
+
+#' Plot time series comparison of multiple tests
+#'
+#' @param tcp_data Combined dataframe of all TCP test data 
+#' @param color_by Variable to use for coloring (default: "file")
+#' @param max_series Maximum number of series to show (default: 10)
+#' @param smooth Whether to add smoothed trend lines (default: TRUE)
+#' @return A ggplot object
+plot_time_series_comparison <- function(tcp_data, color_by = "file", max_series = 10, smooth = TRUE) {
+  # Ensure we have proper time information
+  if(!"test_datetime" %in% names(tcp_data) || all(is.na(tcp_data$test_datetime))) {
+    stop("Test datetime information is needed for time series comparison")
+  }
+  
+  # For each file, standardize the time to start at 0
+  tcp_data <- tcp_data %>%
+    group_by(file) %>%
+    mutate(
+      relative_time = interval_start - first(interval_start),
+      actual_time = test_datetime + seconds(interval_start)
+    ) %>%
+    ungroup()
+  
+  # Get the variable to color by
+  if(!color_by %in% names(tcp_data)) {
+    warning("Color variable not found, using file name")
+    color_by <- "file"
+  }
+  
+  # Limit number of series to avoid overplotting
+  unique_values <- unique(tcp_data[[color_by]])
+  if(length(unique_values) > max_series) {
+    # If we have too many, take the most recent ones based on datetime
+    if(color_by == "file") {
+      # For files, get the most recent ones
+      newest_files <- tcp_data %>%
+        group_by(file) %>%
+        summarize(last_time = max(test_datetime), .groups = "drop") %>%
+        arrange(desc(last_time)) %>%
+        slice_head(n = max_series) %>%
+        pull(file)
+      
+      tcp_data <- tcp_data %>%
+        filter(file %in% newest_files)
+    } else {
+      # For other variables, just take the first max_series values
+      keep_values <- unique_values[1:max_series]
+      tcp_data <- tcp_data %>%
+        filter(!!sym(color_by) %in% keep_values)
+    }
+    
+    message("Limited to ", max_series, " series to avoid overplotting")
+  }
+  
+  # Plot the time series - Two options: by relative time or actual time
+  
+  # Option 1: Using relative time (aligned to start at 0)
+  p1 <- tcp_data %>%
+    ggplot(aes(x = relative_time, y = bitrate_mbps, color = !!sym(color_by), group = interaction(file, !!sym(color_by)))) +
+    geom_line(alpha = 0.7) +
+    labs(
+      title = "Network Performance Comparison Over Test Duration",
+      x = "Time from start (seconds)",
+      y = "Throughput (Mbps)",
+      color = str_to_title(gsub("_", " ", color_by))
+    ) +
+    theme_minimal()
+  
+  # Option 2: Using actual datetime
+  p2 <- tcp_data %>%
+    ggplot(aes(x = actual_time, y = bitrate_mbps, color = !!sym(color_by), group = interaction(file, !!sym(color_by)))) +
+    geom_line(alpha = 0.7) +
+    labs(
+      title = "Network Performance Over Time",
+      x = "Date/Time",
+      y = "Throughput (Mbps)",
+      color = str_to_title(gsub("_", " ", color_by))
+    ) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  # Add smoothing if requested
+  if(smooth) {
+    p1 <- p1 + geom_smooth(method = "loess", se = FALSE, span = 0.3, linewidth = 1.2)
+    p2 <- p2 + geom_smooth(method = "loess", se = FALSE, span = 0.3, linewidth = 1.2)
+  }
+  
+  # Combine the plots
+  combined <- p1 / p2 + plot_annotation(
+    title = "Network Performance Time Series Analysis",
+    subtitle = paste("Comparing", length(unique(tcp_data[[color_by]])), "different", gsub("_", " ", color_by), "values"),
+    theme = theme(plot.title = element_text(face = "bold", size = 16))
+  )
+  
+  return(combined)
+}
+
+#' Plot network performance trends over time
+#'
+#' @param tcp_data Combined dataframe of all TCP test data
+#' @param time_unit Unit for time grouping ('day', 'week', 'month', etc.)
+#' @param facet_by Optional variable to facet by (e.g., "user_name") 
+#' @return A ggplot object
+plot_performance_trends <- function(tcp_data, time_unit = "day", facet_by = NULL) {
+  # Try to analyze trends with error handling
+  tryCatch({
+    # Get trends data
+    trends_data <- analyze_time_trends(tcp_data, time_unit)
+    
+    # Create base plot
+    p <- trends_data %>%
+      ggplot(aes(x = time_group, y = avg_throughput)) +
+      geom_line(size = 1, color = "steelblue") +
+      geom_point(aes(size = test_count), color = "steelblue") +
+      geom_ribbon(aes(ymin = pmax(0, avg_throughput - stability), 
+                      ymax = avg_throughput + stability), 
+                  alpha = 0.2, fill = "steelblue") +
+      labs(
+        title = paste("Network Performance Trends by", str_to_title(time_unit)),
+        subtitle = "Average throughput with standard deviation bands",
+        x = str_to_title(time_unit),
+        y = "Throughput (Mbps)",
+        size = "Tests"
+      ) +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(face = "bold"),
+        axis.title = element_text(face = "bold")
+      )
+    
+    # Add faceting if requested and the column exists
+    if(!is.null(facet_by) && facet_by %in% names(tcp_data)) {
+      # We need to regenerate the trends data with the facet variable
+      facet_trends <- tcp_data %>%
+        group_by(!!sym(facet_by)) %>%
+        group_modify(~ analyze_time_trends(.x, time_unit)) %>%
+        ungroup()
+      
+      # Create faceted plot
+      p <- facet_trends %>%
+        ggplot(aes(x = time_group, y = avg_throughput, color = !!sym(facet_by), fill = !!sym(facet_by))) +
+        geom_line(size = 1) +
+        geom_point(aes(size = test_count)) +
+        geom_ribbon(aes(ymin = pmax(0, avg_throughput - stability), 
+                        ymax = avg_throughput + stability), 
+                    alpha = 0.1) +
+        labs(
+          title = paste("Network Performance Trends by", str_to_title(time_unit)),
+          subtitle = paste("Faceted by", str_to_title(gsub("_", " ", facet_by))),
+          x = str_to_title(time_unit),
+          y = "Throughput (Mbps)",
+          size = "Tests",
+          color = str_to_title(gsub("_", " ", facet_by)),
+          fill = str_to_title(gsub("_", " ", facet_by))
+        ) +
+        theme_minimal() +
+        theme(
+          plot.title = element_text(face = "bold"),
+          axis.title = element_text(face = "bold")
+        ) +
+        facet_wrap(vars(!!sym(facet_by)), scales = "free_y")
+    }
+    
+    return(p)
+  }, error = function(e) {
+    message("Error in plot_performance_trends: ", e$message)
+    # Return a blank plot with error message
+    ggplot() + 
+      annotate("text", x = 0.5, y = 0.5, 
+               label = paste("Could not create Performance Trends plot:", e$message)) +
+      theme_void()
+  })
+}
+
+#' Create a day-of-week by hour heatmap of performance
+#'
+#' @param tcp_data Combined dataframe of all TCP test data
+#' @param facet_by Optional variable to facet by (e.g., "user_name")
+#' @return A ggplot object
+plot_time_pattern_heatmap <- function(tcp_data, facet_by = NULL) {
+  # Try to create the heatmap with error handling
+  tryCatch({
+    # Check if we have datetime information
+    if(!"test_datetime" %in% names(tcp_data) || all(is.na(tcp_data$test_datetime))) {
+      stop("Valid test_datetime information is required for time pattern heatmap")
+    }
+    
+    # Extract day of week and hour from datetime
+    heatmap_data <- tcp_data %>%
+      mutate(
+        day_of_week = wday(test_datetime, label = TRUE),
+        hour_of_day = hour(test_datetime)
+      ) %>%
+      group_by(day_of_week, hour_of_day) %>%
+      summarize(
+        avg_throughput = mean(bitrate_mbps, na.rm = TRUE),
+        test_count = n_distinct(file),
+        data_points = n(),
+        .groups = "drop"
+      )
+    
+    # Create heatmap
+    p <- heatmap_data %>%
+      ggplot(aes(x = hour_of_day, y = day_of_week, fill = avg_throughput)) +
+      geom_tile() +
+      scale_fill_viridis_c(option = "plasma", name = "Mbps") +
+      scale_x_continuous(breaks = seq(0, 23, 3),
+                       labels = c("12am", "3am", "6am", "9am", "12pm", "3pm", "6pm", "9pm")) +
+      labs(
+        title = "Performance Pattern by Day and Hour",
+        subtitle = "Average throughput (Mbps)",
+        x = "Hour of Day",
+        y = "Day of Week"
+      ) +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(face = "bold"),
+        axis.title = element_text(face = "bold")
+      )
+    
+    # Add faceting if requested
+    if(!is.null(facet_by) && facet_by %in% names(tcp_data)) {
+      facet_heatmap <- tcp_data %>%
+        mutate(
+          day_of_week = wday(test_datetime, label = TRUE),
+          hour_of_day = hour(test_datetime)
+        ) %>%
+        group_by(!!sym(facet_by), day_of_week, hour_of_day) %>%
+        summarize(
+          avg_throughput = mean(bitrate_mbps, na.rm = TRUE),
+          test_count = n_distinct(file),
+          data_points = n(),
+          .groups = "drop"
+        )
+      
+      p <- facet_heatmap %>%
+        ggplot(aes(x = hour_of_day, y = day_of_week, fill = avg_throughput)) +
+        geom_tile() +
+        scale_fill_viridis_c(option = "plasma", name = "Mbps") +
+        scale_x_continuous(breaks = seq(0, 23, 6),
+                         labels = c("12am", "6am", "12pm", "6pm")) +
+        labs(
+          title = "Performance Pattern by Day and Hour",
+          subtitle = paste("Faceted by", str_to_title(gsub("_", " ", facet_by))),
+          x = "Hour of Day",
+          y = "Day of Week"
+        ) +
+        theme_minimal() +
+        theme(
+          plot.title = element_text(face = "bold"),
+          axis.title = element_text(face = "bold")
+        ) +
+        facet_wrap(vars(!!sym(facet_by)))
+    }
+    
+    return(p)
+  }, error = function(e) {
+    message("Error in plot_time_pattern_heatmap: ", e$message)
+    # Return a blank plot with error message
+    ggplot() + 
+      annotate("text", x = 0.5, y = 0.5, 
+               label = paste("Could not create Time Pattern Heatmap:", e$message)) +
+      theme_void()
+  })
 }
